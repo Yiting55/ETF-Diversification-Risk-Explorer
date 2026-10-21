@@ -1,0 +1,93 @@
+# Diversification X-Ray
+
+IS4228 technical-track proof of concept (category: consumer fintech application).
+
+Enter a portfolio of US stocks and ETFs and see how diversified it really is: how many
+independent bets it behaves like, how much risk diversification removes, which holdings drive
+the risk, and how all of that changed in the 2020 COVID crash and the 2022 inflation /
+Russia-Ukraine sell-off.
+
+## Setup
+
+Requires Python 3.11+.
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Windows  (macOS/Linux: source .venv/bin/activate)
+pip install -r requirements.txt
+```
+
+### Build the data (about 11 minutes, once)
+
+```bash
+python scripts/fetch_universe.py
+```
+
+This downloads every US-listed security from the Nasdaq Trader symbol directory, pulls daily
+price history from Yahoo Finance, and filters it to:
+
+* no leveraged / inverse / buffer / volatility funds or ETNs, no warrants, preferreds or units
+* at least 7 years of history (covers the 2020 and 2022 stress windows)
+* median daily dollar volume of at least US$1M over the last year; stocks priced at least $5
+
+Result (Oct 2026): 967 ETFs (869 distinct exposures after merging near-duplicates) and 2,537
+stocks. Outputs go to `data/universe/` (lists, plus an audit file with the reason every
+excluded ticker was dropped) and `data/processed/` (daily and weekly adjusted closes).
+Raw downloads in `data/raw/` are git-ignored. Re-running resumes from the last finished batch.
+
+## Run
+
+```bash
+streamlit run app/streamlit_app.py
+```
+
+Tickers outside the filtered list (e.g. funds younger than 7 years such as SGOV) can still be
+typed in; they are downloaded on first use and cached in `data/cache/`.
+
+## Tests
+
+```bash
+python -m pytest
+```
+
+Unit tests check the metrics against cases with known answers (uncorrelated assets = N bets,
+perfectly correlated = 1 bet, risk shares sum to 100%, hedges exceed N). Integration tests
+check the stress windows against the S&P 500's known peak-to-trough falls.
+
+## Structure
+
+```
+app/streamlit_app.py      front end
+engine/                   calculation engine (no Streamlit dependency, reusable behind an API)
+  data.py                 price store: local parquet + on-demand Yahoo download with cache
+  metrics.py              diversification ratio, effective bets, risk shares, covariance estimation
+  scenarios.py            normal lookback and stress windows
+  analyze.py              portfolio -> results, with date alignment and exclusion rules
+scripts/fetch_universe.py data pipeline
+tests/                    pytest suite
+```
+
+## Method
+
+All metrics come from the diversification ratio DR = (sum of w_i * sigma_i) / sigma_p:
+
+| Shown to user | Formula |
+|---|---|
+| Independent bets | DR^2 |
+| Risk removed by diversification | 1 - 1/DR |
+| Holdings by weight | 1 / sum(w_i^2) |
+| Share of risk per holding | w_i (Sigma w)_i / sigma_p^2 |
+| Bad-year loss | 1.645 * sigma_p * portfolio value |
+
+* **Normal window:** last 5 years of daily returns by default (3 / 5 / 7 selectable).
+* **Stress windows:** S&P 500 peak close to trough close, so 19 Feb - 23 Mar 2020 (COVID) and
+  3 Jan - 12 Oct 2022 (inflation shock and Russia-Ukraine war); plus a custom date range.
+* **Small samples:** with fewer than 3 trading days per holding, correlations are shrunk toward
+  their average (Ledoit & Wolf 2004, constant-correlation target) and flagged low confidence.
+
+## Known limitations
+
+* Survivorship bias: only currently listed tickers are included.
+* Yahoo Finance data is unofficial and fine for a proof of concept; a production version would
+  license a data feed.
+* The bad-year figure assumes normally distributed returns, which understates tail risk.

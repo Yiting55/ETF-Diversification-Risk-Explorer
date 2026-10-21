@@ -1,0 +1,7 @@
+# Generated data - rebuild with: python scripts/fetch_universe.py
+data/raw/
+data/cache/
+.env
+__pycache__/
+.venv/
+.pytest_cache/
