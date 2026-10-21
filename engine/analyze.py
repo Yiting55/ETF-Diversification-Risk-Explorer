@@ -67,7 +67,7 @@ def clean_holdings(holdings: dict[str, float]) -> pd.Series:
 
 
 def analyze_window(prices: pd.DataFrame, weights: pd.Series, scenario: Scenario, value: float,
-                   align_start: bool) -> WindowResult | None:
+                   align_start: bool, shrink: bool | None = None) -> WindowResult | None:
     px = prices.loc[scenario.start:scenario.end, weights.index]
     notes, excluded = [], {}
     if px.empty:
@@ -99,7 +99,7 @@ def analyze_window(prices: pd.DataFrame, weights: pd.Series, scenario: Scenario,
     if len(rets) < MIN_OBS:
         return None
 
-    too_short = len(rets) < DAYS_PER_HOLDING * len(kept)
+    too_short = len(rets) < DAYS_PER_HOLDING * len(kept) if shrink is None else shrink
     cov, corr, shrink = estimate_covariance(rets, shrink=too_short)
     m = diversification_metrics(w.to_numpy(), cov)
     low_conf = too_short or (align_start and len(rets) < SHORT_HISTORY_DAYS)

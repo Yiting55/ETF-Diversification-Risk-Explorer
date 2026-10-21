@@ -19,6 +19,7 @@ from engine import STRESS_SCENARIOS, analyze, custom_window  # noqa: E402
 from engine.data import PriceStore, load_universe, normalize_ticker  # noqa: E402
 from engine.correlation import average_pairwise, rolling_correlation  # noqa: E402
 from engine.scenarios import DEFAULT_LOOKBACK, LOOKBACK_CHOICES  # noqa: E402
+from app.whatif_tab import render_whatif  # noqa: E402
 
 st.set_page_config(page_title="Diversification X-Ray", page_icon=":material/donut_small:", layout="wide")
 
@@ -358,7 +359,7 @@ def main():
         st.info("Add at least one holding with a positive weight in the sidebar.", icon=":material/arrow_back:")
         return
 
-    tab_normal, tab_stress = st.tabs(["Historical overview", "Stress test"])
+    tab_normal, tab_stress, tab_whatif = st.tabs(["Historical overview", "Stress test", "What if: add one ETF"])
 
     with tab_stress:
         options = {**{k: s.label for k, s in STRESS_SCENARIOS.items()}, "custom": "Custom period"}
@@ -408,6 +409,9 @@ def main():
             st.warning("Not enough overlapping price data for this period.")
         else:
             stress_section(result.normal, result.stress[key], value, result.correlations[key])
+
+    with tab_whatif:
+        render_whatif(holdings, lookback, price_store(ENGINE_REVISION), value, ENGINE_REVISION)
 
     with st.expander("How we calculate this"):
         st.markdown(METHODOLOGY)
@@ -487,6 +491,12 @@ avoids making a short crash look more diversified than it was.
 
 **Source.** Choueifaty & Coignard (2008), [Toward Maximum Diversification](https://www.tobam.fr/wp-content/uploads/2014/12/TOBAM-JoPM-Maximum-Div-2008.pdf),
 defines DR. We use DR² as an equivalent-bets interpretation of the volatility reduction.
+
+**What if.** Each candidate is tested at 5-40% of the portfolio, with existing holdings scaled down pro-rata:
+w' = (1 − α)·w + α·e_k. Expected return uses CAPM, E(Rᵢ) = r_f + βᵢ × market risk premium, with β against VT over the
+historical lookback and r_f from the trailing 12-month return of BIL. The robustness check resamples that window in
+21-day blocks 200 times. Buying US$A with new money on a portfolio worth US$V gives the same mix as α = A / (V + A);
+dollar losses use the portfolio value after the purchase.
 """
 
 main()
