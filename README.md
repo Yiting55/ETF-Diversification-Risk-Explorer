@@ -73,11 +73,18 @@ All metrics come from the diversification ratio DR = (sum of w_i * sigma_i) / si
 
 | Shown to user | Formula |
 |---|---|
-| Independent bets | DR^2 |
+| Equivalent bets (volatility-based) | DR^2 |
 | Risk removed by diversification | 1 - 1/DR |
 | Holdings by weight | 1 / sum(w_i^2) |
 | Share of risk per holding | w_i (Sigma w)_i / sigma_p^2 |
 | Bad-year loss | 1.645 * sigma_p * portfolio value |
+
+The score details compare DR² with a zero-correlation baseline, holding weights and
+volatilities fixed: `(sum(w_i * sigma_i))^2 / sum((w_i * sigma_i)^2)`. A collapsed
+section also compares 3 / 5 / 7-year scores and their actual dates. These overlapping
+windows are a sensitivity check, not a confidence interval. DR² is an equivalent-bets
+measure, not a literal count of independent risk factors; hedges can lift it above
+the holding count. DR follows Choueifaty & Coignard (2008), *Toward Maximum Diversification*.
 
 * **Normal window:** last 5 years of daily returns by default (3 / 5 / 7 selectable).
 * **Stress windows:** S&P 500 peak close to trough close, so 19 Feb - 23 Mar 2020 (COVID) and

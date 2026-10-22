@@ -6,7 +6,7 @@ Everything here is derived from one quantity, the diversification ratio
 
 i.e. "risk if nothing offset anything" divided by "risk you actually have".
 
-    effective_bets  = DR^2       count of independent bets the portfolio behaves like
+    effective_bets  = DR^2       volatility-based equivalent number of uncorrelated bets
                                   (N uncorrelated, equal-vol, equal-weight assets -> exactly N;
                                    perfectly correlated assets -> 1)
     risk_reduction  = 1 - 1/DR   share of risk removed by diversification
@@ -60,7 +60,12 @@ def estimate_covariance(returns: pd.DataFrame, shrink: bool) -> tuple[np.ndarray
     T-bill fund keeps its tiny volatility instead of being pulled toward NVDA's.
     """
     x = returns.to_numpy(dtype=float)
+    if x.ndim != 2 or x.shape[0] < 2 or x.shape[1] == 0 or not np.isfinite(x).all():
+        raise ValueError("Risk estimates require at least two days of finite returns.")
     vol = x.std(axis=0, ddof=1)
+    constant = returns.columns[vol <= np.finfo(float).eps]
+    if len(constant):
+        raise ValueError(f"Cannot estimate diversification: no measurable price variation for {', '.join(map(str, constant))}.")
     z = (x - x.mean(axis=0)) / vol
     if shrink:
         corr, shrinkage = _constant_correlation_shrinkage(z)
@@ -74,9 +79,18 @@ def estimate_covariance(returns: pd.DataFrame, shrink: bool) -> tuple[np.ndarray
 
 def diversification_metrics(weights: np.ndarray, cov: np.ndarray) -> dict:
     w = np.asarray(weights, dtype=float)
+    cov = np.asarray(cov, dtype=float)
+    if (w.ndim != 1 or not len(w) or cov.shape != (len(w), len(w))
+            or not np.isfinite(w).all() or not np.isfinite(cov).all()
+            or (w < 0).any() or not np.isclose(w.sum(), 1)
+            or (np.diag(cov) < 0).any()):
+        raise ValueError("Diversification requires finite covariance data and non-negative weights summing to 100%.")
     vols = np.sqrt(np.diag(cov))
-    port_vol = float(np.sqrt(w @ cov @ w))
     undiversified_vol = float(w @ vols)            # what volatility would be with all correlations = 1
+    variance = float(w @ cov @ w)
+    if undiversified_vol <= 0 or variance <= undiversified_vol ** 2 * 1e-12:
+        raise ValueError("Portfolio volatility is zero or near zero; the diversification score is not reliable.")
+    port_vol = float(np.sqrt(variance))
     dr = undiversified_vol / port_vol
     return {
         "portfolio_vol": port_vol,
@@ -84,6 +98,7 @@ def diversification_metrics(weights: np.ndarray, cov: np.ndarray) -> dict:
         "diversification_ratio": dr,
         "effective_bets": dr ** 2,
         "weight_count": float(1 / np.sum(w ** 2)),
+        "uncorrelated_bets": float(undiversified_vol ** 2 / np.sum((w * vols) ** 2)),
         "risk_reduction": 1 - 1 / dr,
         "asset_vols": vols,
         "risk_share": w * (cov @ w) / port_vol ** 2,

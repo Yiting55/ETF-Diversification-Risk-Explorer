@@ -13,7 +13,7 @@ import pandas as pd
 
 from .data import PriceStore, normalize_ticker
 from .metrics import diversification_metrics, dollar_view, estimate_covariance, replay
-from .scenarios import DEFAULT_LOOKBACK, STRESS_SCENARIOS, Scenario, normal_window
+from .scenarios import DEFAULT_LOOKBACK, LOOKBACK_CHOICES, STRESS_SCENARIOS, Scenario, normal_window
 
 MIN_COVERAGE = 0.95          # share of a stress window's trading days a holding must have
 MIN_OBS = 15                 # below this a covariance estimate is meaningless
@@ -45,12 +45,15 @@ class Analysis:
     stress: dict[str, WindowResult]
     unknown: list[str]
     value: float
+    lookbacks: dict[int, WindowResult | None] = field(default_factory=dict)
 
 
 def clean_holdings(holdings: dict[str, float]) -> pd.Series:
     # Build from pairs, not a dict comprehension: "voo" and "VOO" must add up, not overwrite.
     pairs = [(normalize_ticker(t), float(x)) for t, x in holdings.items() if t and t.strip()]
     w = pd.Series([x for _, x in pairs], index=[t for t, _ in pairs], dtype=float)
+    if not np.isfinite(w.to_numpy()).all():
+        raise ValueError("Weights must be finite numbers.")
     w = w.groupby(level=0).sum()
     if (w < 0).any():
         raise ValueError("Weights must be non-negative (long-only portfolios).")
@@ -64,6 +67,8 @@ def analyze_window(prices: pd.DataFrame, weights: pd.Series, scenario: Scenario,
                    align_start: bool) -> WindowResult | None:
     px = prices.loc[scenario.start:scenario.end, weights.index]
     notes, excluded = [], {}
+    if px.empty:
+        return None
 
     if align_start:
         first = px.apply(pd.Series.first_valid_index).dropna()
@@ -128,4 +133,12 @@ def analyze(holdings: dict[str, float], value: float = 10_000, lookback_years: i
         r = analyze_window(prices, weights, s, value, align_start=False)
         if r is not None:
             results[s.key] = r
-    return Analysis(normal=normal, stress=results, unknown=unknown, value=value)
+    lookbacks = {lookback_years: normal}
+    for years in LOOKBACK_CHOICES:
+        if years != lookback_years:
+            try:
+                lookbacks[years] = analyze_window(
+                    prices, weights, normal_window(as_of, years), value, align_start=True)
+            except ValueError:
+                lookbacks[years] = None
+    return Analysis(normal=normal, stress=results, unknown=unknown, value=value, lookbacks=lookbacks)

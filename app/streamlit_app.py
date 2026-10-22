@@ -48,6 +48,7 @@ def universe() -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Measuring correlations...")
 def run_analysis(holdings: tuple, value: float, lookback: int, custom: tuple | None):
+    """Cache the analysis including the score baseline and lookback comparison."""
     stress = list(STRESS_SCENARIOS.values())
     if custom:
         stress.append(custom_window(*custom))
@@ -61,7 +62,7 @@ def money(x: float) -> str:
 
 
 def bets_text(m: dict, n: int) -> str:
-    return f"> {n} (hedged)" if m["hedged"] else f"{m['effective_bets']:.1f}"
+    return f"{m['effective_bets']:.1f}" + (" (hedged)" if m["hedged"] else "")
 
 
 def base_layout(fig: go.Figure, height: int, **kw) -> go.Figure:
@@ -150,11 +151,11 @@ def avg_corr(corr: pd.DataFrame) -> float:
 
 def headline(res, value: float):
     m, n = res.metrics, len(res.tickers)
-    st.markdown(f"#### You hold {n} investments, but they behave like **{bets_text(m, n)} independent bets**.")
+    st.markdown(f"#### Your {n} holdings provide **{bets_text(m, n)} equivalent bets**.")
     a, b, c = (col.container(border=True) for col in st.columns(3))
-    a.metric("Independent bets", bets_text(m, n),
-             help="How many truly independent sources of risk you have, after accounting for how your "
-                  "holdings move together.")
+    a.metric("Equivalent bets (DR²)", bets_text(m, n),
+             help="A volatility-based diversification measure, expressed as equivalent uncorrelated bets. "
+                  "It is not a count of independent risk factors. Negative correlations can push it above the holding count.")
     a.caption(f"By weight alone you look like {m['weight_count']:.1f} holdings.")
     b.metric("Risk removed by diversification", f"{m['risk_reduction']:.0%}")
     b.caption(f"Your volatility is {m['portfolio_vol']:.1%} a year; with every holding moving in "
@@ -163,6 +164,44 @@ def headline(res, value: float):
              help="Parametric estimate: 1.645 x annual volatility x portfolio value.")
     c.caption(f"Without any diversification it would be "
               f"{money(res.dollars['bad_year_loss_undiversified'])}.")
+
+
+def score_details(result):
+    """Keep score interpretation and sensitivity out of the main chart area."""
+    res = result.normal
+    m = res.metrics
+    with st.expander("Understand your diversification score"):
+        st.dataframe(pd.DataFrame({
+            "Measure": ["Holdings", "Effective holdings by weight", "Equivalent bets (DR²)"],
+            "Value": [str(len(res.tickers)), f"{m['weight_count']:.1f}", f"{m['effective_bets']:.1f}"],
+            "Accounts for": ["Ticker count", "Capital concentration", "Weights, volatility and correlation"],
+        }), hide_index=True, width="stretch")
+        baseline = m["uncorrelated_bets"]
+        st.markdown(f"With the **same weights and volatilities**, but zero correlations, your score would be "
+                    f"**{baseline:.1f}**, compared with **{m['effective_bets']:.1f}** using observed correlations.")
+        st.caption("Positive correlations can reduce the score; negative correlations can improve it. "
+                   "A gap from the weight-only count can also reflect differences in volatility.")
+        st.markdown("**Lookback sensitivity**")
+        rows = []
+        available = []
+        for years in LOOKBACK_CHOICES:
+            window = result.lookbacks.get(years)
+            if window is None:
+                rows.append({"Lookback": f"{years} years", "Equivalent bets": "Unavailable",
+                             "Actual dates": "Insufficient or invalid data", "Confidence": "—"})
+                continue
+            available.append(window)
+            rows.append({"Lookback": f"{years} years", "Equivalent bets": f"{window.metrics['effective_bets']:.2f}",
+                         "Actual dates": f"{window.start:%d %b %Y} – {window.end:%d %b %Y}",
+                         "Confidence": "Limited history / sample" if window.low_confidence else "Standard sample"})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        if len(available) > 1:
+            scores = [w.metrics["effective_bets"] for w in available]
+            st.caption(f"Score range: {min(scores):.2f}–{max(scores):.2f}. "
+                       "These overlapping historical windows are a sensitivity check, not a confidence interval.")
+            if len({(w.start, w.end) for w in available}) < len(available):
+                st.caption("Some lookbacks use the same actual dates because overlapping price history is limited.")
+        st.caption("All lookbacks include sell-offs within their dates. Scores depend on the historical sample.")
 
 
 def notes(res):
@@ -271,6 +310,7 @@ def main():
         notes(res)
         duplicate_warning(res.tickers)
         headline(res, value)
+        score_details(result)
         left, right = st.columns(2)
         with left:
             st.subheader("Where your risk comes from")
@@ -306,7 +346,7 @@ def stress_section(normal, res, value: float):
                 f"**{money(value + loss)}** ({res.replay['total_return']:+.1%}).")
 
     a, b, c, d = st.columns(4)
-    a.metric("Independent bets", bets_text(sm, n), delta=f"{sm['effective_bets'] - nm['effective_bets']:+.1f} vs normal",
+    a.metric("Equivalent bets (DR²)", bets_text(sm, n), delta=f"{sm['effective_bets'] - nm['effective_bets']:+.1f} vs normal",
              border=True)
     b.metric("Risk removed by diversification", f"{sm['risk_reduction']:.0%}",
              delta=f"{(sm['risk_reduction'] - nm['risk_reduction']) * 100:+.0f} pts vs normal", border=True)
@@ -339,8 +379,10 @@ All numbers use **daily total returns** (dividends reinvested) from Yahoo Financ
 **Diversification ratio (DR)** = weighted average of each holding's volatility / the portfolio's actual volatility.
 If all holdings moved in lockstep the two would be equal (DR = 1).
 
-* **Independent bets** = DR². Five uncorrelated, equally risky holdings at equal weight give exactly 5; holdings that move
-  in lockstep give 1. Negatively correlated hedges can push it above the number of holdings ("hedged").
+* **Equivalent bets** = DR², a volatility-based measure, not a literal count of independent risk factors.
+  Five uncorrelated, equally risky holdings at equal weight give exactly 5; holdings that move in lockstep give 1.
+  Negatively correlated hedges can push it above the number of holdings ("hedged").
+* **Zero-correlation baseline** = (Σwᵢσᵢ)² / Σ(wᵢσᵢ)². It keeps weights and volatilities fixed to isolate the effect of correlation.
 * **Risk removed** = 1 - 1/DR: the share of risk that offsetting moves cancel out.
 * **Share of risk** for each holding = its contribution to portfolio variance, wᵢ(Σw)ᵢ / σₚ². These add up to 100%.
 * **Bad year** = 1.645 × annual volatility × portfolio value, a 1-in-20 one-year loss under a normal approximation.
@@ -352,6 +394,9 @@ war (3 Jan - 12 Oct 2022). The stress replay is buy-and-hold from the starting w
 **Small samples.** When a window has fewer than 3 trading days per holding, correlations are shrunk toward their
 average (Ledoit & Wolf, 2004) and flagged as low confidence. Shrinking toward the average rather than toward zero
 avoids making a short crash look more diversified than it was.
+
+**Source.** Choueifaty & Coignard (2008), [Toward Maximum Diversification](https://www.tobam.fr/wp-content/uploads/2014/12/TOBAM-JoPM-Maximum-Div-2008.pdf),
+defines DR. We use DR² as an equivalent-bets interpretation of the volatility reduction.
 """
 
 main()

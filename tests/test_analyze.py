@@ -40,3 +40,33 @@ def test_duplicate_and_lowercase_tickers_are_merged():
     r = analyze({"voo": 50, "VOO": 50, "agg": 100})
     assert r.normal.tickers == ["AGG", "VOO"] or r.normal.tickers == ["VOO", "AGG"]
     assert sorted(r.normal.weights) == pytest.approx([0.5, 0.5])
+
+
+def test_lookback_comparison_reuses_selected_result(result):
+    assert set(result.lookbacks) == {3, 5, 7}
+    assert result.lookbacks[5] is result.normal
+    assert result.lookbacks[7].start < result.lookbacks[3].start
+    assert all(w.end == result.normal.end for w in result.lookbacks.values())
+
+
+def test_short_history_lookbacks_report_same_actual_dates():
+    import numpy as np
+    import pandas as pd
+    from engine import analyze
+
+    dates = pd.bdate_range("2026-01-01", periods=100)
+    prices = pd.DataFrame({"NEW": 100 * np.cumprod(1 + np.random.default_rng(4).normal(0, 0.01, 100))}, index=dates)
+
+    class Store:
+        def get(self, tickers):
+            return prices[tickers], []
+
+    r = analyze({"NEW": 1}, stress=[], store=Store())
+    assert len({(w.start, w.end) for w in r.lookbacks.values()}) == 1
+    assert all(w.low_confidence for w in r.lookbacks.values())
+
+
+def test_nonfinite_weights_are_rejected():
+    from engine.analyze import clean_holdings
+    with pytest.raises(ValueError, match="finite numbers"):
+        clean_holdings({"SPY": float("nan")})

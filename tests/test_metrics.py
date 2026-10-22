@@ -64,3 +64,48 @@ def test_replay_buy_and_hold():
     r = replay(px, np.array([0.5, 0.5]))
     assert r["total_return"] == pytest.approx(-0.25)
     assert r["max_drawdown"] == pytest.approx(-0.25)
+
+
+def test_zero_correlation_baseline_isolates_correlation_effect():
+    w = np.array([0.6, 0.4])
+    vols = [0.3, 0.1]
+    uncorrelated = diversification_metrics(w, cov_from(vols, np.eye(2)))
+    correlated = diversification_metrics(w, cov_from(vols, [[1, 0.8], [0.8, 1]]))
+    assert correlated["uncorrelated_bets"] == pytest.approx(uncorrelated["effective_bets"])
+    assert correlated["effective_bets"] < correlated["uncorrelated_bets"]
+    assert correlated["uncorrelated_bets"] < correlated["weight_count"]
+
+
+def test_negative_correlation_improves_score_over_baseline():
+    m = diversification_metrics(np.array([0.5, 0.5]), cov_from([0.2, 0.2], [[1, -0.5], [-0.5, 1]]))
+    assert m["effective_bets"] == pytest.approx(4)
+    assert m["uncorrelated_bets"] == pytest.approx(2)
+
+
+@pytest.mark.parametrize("shrink", [False, True])
+def test_constant_prices_have_clear_error(shrink):
+    with pytest.raises(ValueError, match="no measurable price variation for CASH"):
+        estimate_covariance(pd.DataFrame({"CASH": [0.0] * 20}), shrink=shrink)
+
+
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_nonfinite_returns_are_rejected(bad):
+    with pytest.raises(ValueError, match="finite returns"):
+        estimate_covariance(pd.DataFrame({"A": [0.01, bad, -0.01]}), shrink=False)
+
+
+@pytest.mark.parametrize("correlation", [-1, -1 + 1e-13])
+def test_zero_or_near_zero_portfolio_volatility_has_clear_error(correlation):
+    with pytest.raises(ValueError, match="zero or near zero"):
+        diversification_metrics(np.array([0.5, 0.5]),
+                                cov_from([0.2, 0.2], [[1, correlation], [correlation, 1]]))
+
+
+def test_low_but_nonzero_volatility_is_supported():
+    m = diversification_metrics(np.array([1.0]), np.array([[1e-16]]))
+    assert m["effective_bets"] == pytest.approx(1)
+
+
+def test_nonfinite_covariance_is_rejected():
+    with pytest.raises(ValueError, match="finite covariance"):
+        diversification_metrics(np.array([1.0]), np.array([[np.nan]]))
