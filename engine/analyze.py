@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .data import PriceStore, normalize_ticker
+from .correlation import CorrelationComparison, compare_correlations
 from .metrics import diversification_metrics, dollar_view, estimate_covariance, replay
 from .scenarios import DEFAULT_LOOKBACK, LOOKBACK_CHOICES, STRESS_SCENARIOS, Scenario, normal_window
 
@@ -46,6 +47,8 @@ class Analysis:
     unknown: list[str]
     value: float
     lookbacks: dict[int, WindowResult | None] = field(default_factory=dict)
+    correlation_prices: pd.DataFrame = field(default_factory=pd.DataFrame)
+    correlations: dict[str, CorrelationComparison] = field(default_factory=dict)
 
 
 def clean_holdings(holdings: dict[str, float]) -> pd.Series:
@@ -141,4 +144,6 @@ def analyze(holdings: dict[str, float], value: float = 10_000, lookback_years: i
                     prices, weights, normal_window(as_of, years), value, align_start=True)
             except ValueError:
                 lookbacks[years] = None
-    return Analysis(normal=normal, stress=results, unknown=unknown, value=value, lookbacks=lookbacks)
+    comparisons = {s.key: compare_correlations(prices[weights.index], s) for s in scenarios}
+    return Analysis(normal=normal, stress=results, unknown=unknown, value=value, lookbacks=lookbacks,
+                    correlation_prices=prices[weights.index], correlations=comparisons)
