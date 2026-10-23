@@ -11,6 +11,7 @@ PLOTLY_CONFIG = {"displayModeBar": False}
 MUTED = "#8f8e88"
 PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
 WINDOWS = {"normal": "Historical overview", "covid": "COVID 2020", "2022": "2022 sell-off"}
+SHORT = {"covid": "COVID", "2022": "2022"}
 MAX_CUSTOM = 3
 
 
@@ -64,8 +65,21 @@ def _spread_labels(ends: dict, min_gap_share: float = 0.045):
     return out
 
 
+def _crisis_line(tbl: pd.DataFrame, pick: str | None = None) -> str:
+    both = list(tbl.index[tbl["all_crises"]])
+    if not both:
+        line = "**None of these would have softened both COVID 2020 and the 2022 sell-off.**"
+    else:
+        line = f"**Softened both COVID 2020 and the 2022 sell-off:** {', '.join(both)}."
+    if pick is not None and pick in tbl.index:
+        line += (f" Your pick {pick} did too." if tbl.at[pick, "all_crises"]
+                 else f" Your pick {pick} did not.")
+    return line + " Different crises reward different diversifiers."
+
+
 def _pts(x: float, digits: int = 1) -> str:
-    return f"{x * 100:+.{digits}f} pts"
+    v = round(x * 100, digits)
+    return f"{0.0:.{digits}f} pts" if v == 0 else f"{v:+.{digits}f} pts"
 
 
 def _money(x: float) -> str:
@@ -196,14 +210,21 @@ def _render_compare(key: tuple, lookback: int, store, rev: str):
         cols["Δ expected return"] = tbl["d_er"].map(lambda x: _pts(x, 2))
     else:
         cols["Δ worst fall"] = tbl["d_max_dd"].map(_pts)
-    cols["Most bets at"] = tbl["best_alpha"].map(lambda x: "40% or more" if x >= max(wf.ALPHA_GRID) else f"{x:.0%}")
+    if normal:
+        for c in [c for c in tbl.columns if c.startswith("dd_") and c[3:] in WINDOWS]:
+            cols[f"Δ fall {SHORT[c[3:]]}"] = tbl[c].map(lambda x: "n/a" if pd.isna(x) else _pts(x))
+    if not normal:
+        cols["Most bets at"] = tbl["best_alpha"].map(lambda x: "40% or more" if x >= max(wf.ALPHA_GRID) else f"{x:.0%}")
     cols["Efficient"] = tbl["efficient"].map({True: "Yes", False: ""})
+    cols["Both crises"] = tbl["all_crises"].map({True: "Yes", False: ""})
     st.dataframe(pd.DataFrame(cols), hide_index=True, width="stretch")
+    st.markdown(_crisis_line(tbl))
     st.caption("Efficient = no other candidate is better on both added bets and "
                + ("expected return." if normal else "worst fall.")
                + (" A positive change in worst fall means a shallower drop." if not normal else "")
                + (" Candidates you already hold (or a near-identical fund of) get a larger weight, not a new line."
-                  if tbl["held"].any() else ""))
+                  if tbl["held"].any() else "")
+               + " Both crises = the worst fall would have been shallower in COVID 2020 and in the 2022 sell-off.")
 
     left, right = st.columns(2)
     with left:
@@ -350,3 +371,4 @@ def _render_purchase(key: tuple, lookback: int, store, value: float, rev: str):
     if window != "normal":
         st.caption("Ranked by how much shallower the worst fall would have been: "
                    + ", ".join(f"{k} {_pts(v)}" for k, v in tbl["d_max_dd"].items()) + ".")
+    st.markdown(_crisis_line(tbl, pc.ticker))
