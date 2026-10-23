@@ -182,8 +182,28 @@ def ranking_table(wi: WhatIf, window: str = "normal", alpha: float = ALPHA_DEFAU
     y = "d_er" if window == "normal" else "d_max_dd"
     tbl = mark_pareto(tbl, "d_bets", y).sort_values(rank_by, ascending=False)
     tbl["held"] = [wi.held.get(k, "") for k in tbl.index]
+    crises = crisis_effects(wi, alpha).reindex(tbl.index)
+    for key in crises.columns.drop("all_crises"):
+        tbl[f"dd_{key}"] = crises[key]
+    tbl["all_crises"] = crises["all_crises"].fillna(False).astype(bool)
     tbl.insert(0, "rank", range(1, len(tbl) + 1))
     return tbl
+
+
+def crisis_effects(wi: WhatIf, alpha: float) -> pd.DataFrame:
+    """Change in worst fall in each stress window at weight alpha (> 0 = shallower).
+    all_crises is True when the candidate made the fall shallower in every stress window."""
+    out = {}
+    for key in wi.base:
+        if key == "normal":
+            continue
+        g = wi.grid[wi.grid["window"] == key]
+        cur = g.loc[g["candidate"] == "(current)", "max_dd"].iloc[0]
+        at = g[(g["candidate"] != "(current)") & np.isclose(g["alpha"], alpha)].set_index("candidate")["max_dd"]
+        out[key] = at - cur
+    df = pd.DataFrame(out, index=list(wi.candidates))
+    df["all_crises"] = df.notna().all(axis=1) & (df > 0).all(axis=1) if len(out) else False
+    return df
 
 
 def mark_pareto(tbl: pd.DataFrame, x: str, y: str) -> pd.DataFrame:
@@ -246,6 +266,11 @@ def summary_sentence(wi: WhatIf, tbl: pd.DataFrame, window: str, alpha: float,
         tail = (f" and volatility changes by {row['d_vol'] * 100:+.1f} pts, "
                 + (f"at an estimated cost of {abs(cost):.2f} pts of expected return a year (CAPM)."
                    if cost < 0 else f"with expected return changing by {cost:+.2f} pts a year (CAPM)."))
+        missed = [STRESS_SCENARIOS[c[3:]].label for c in tbl.columns
+                  if c.startswith("dd_") and c != "dd_max_dd" and c[3:] in STRESS_SCENARIOS
+                  and not row[c] > 0]
+        if missed:
+            tail += f" It would not have softened the {' or the '.join(missed)}."
     else:
         dd = row["d_max_dd"] * 100
         tail = (f"; the worst fall in this period would have been {abs(dd):.1f} pts "

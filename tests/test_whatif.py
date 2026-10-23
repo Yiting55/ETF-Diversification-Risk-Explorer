@@ -202,3 +202,14 @@ def test_check_purchase_unknown_ticker():
 def test_custom_candidates_are_compared():
     wi2 = run_whatif({"VOO": 60, "QQQ": 40}, candidates={"IEF": "bonds", "VT": "world"}, store=FakeStore())
     assert set(ranking_table(wi2, "normal", 0.1).index) == {"IEF", "VT"}
+
+
+def test_crisis_effects_flag_requires_every_stress_window(wi):
+    from engine.whatif import crisis_effects
+    c = crisis_effects(wi, 0.1)
+    assert set(c.columns) == {"covid", "2022", "all_crises"}
+    expected = (c[["covid", "2022"]] > 0).all(axis=1)
+    assert (c["all_crises"] == expected).all()
+    t = ranking_table(wi, "normal", 0.1)
+    assert (t["all_crises"] == c.loc[t.index, "all_crises"]).all()
+    assert t.loc["IEF", "dd_2022"] == pytest.approx(ranking_table(wi, "2022", 0.1).loc["IEF", "d_max_dd"])
