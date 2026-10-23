@@ -46,7 +46,7 @@ STRESS_SCENARIOS = {
 def normal_window(as_of: pd.Timestamp, years: int) -> Scenario:
     return Scenario(
         key="normal",
-        label=f"Normal markets (last {years} years)",
+        label=f"Historical overview (last {years} years)",
         start=as_of - pd.DateOffset(years=years),
         end=as_of,
         description=f"All trading days in the {years} years to {as_of:%d %b %Y}.",

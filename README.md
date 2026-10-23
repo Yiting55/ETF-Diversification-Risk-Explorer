@@ -69,6 +69,22 @@ tests/                    pytest suite
 
 ## Method
 
+### Correlation views
+
+* **Historical overview:** rolling 60 / 120 / 252-trading-day correlation over the last
+  seven years where available. Default is the unweighted mean of all distinct
+  holding pairs; select a pair to inspect a specific relationship. Fixed holdings
+  and complete return windows prevent changes in pair membership; missing or
+  constant data leaves gaps. COVID and 2022 stress periods are shaded.
+* **Stress test:** Pre-period baseline / Stress period / Change heatmaps use identical holdings with
+  at least 95% price coverage and nonconstant returns in both periods. Pre-period baseline is
+  the year immediately preceding the selected period, not necessarily crisis-free.
+  Dates, return counts, exclusions and short-sample shrinkage are shown. Change is
+  stress minus baseline, on a fixed -2 to +2 scale. The average-correlation metric
+  uses this matched set; existing portfolio risk and return metrics retain the
+  scenario's holdings. Falling together over a period does not necessarily mean
+  high daily return correlation.
+
 All metrics come from the diversification ratio DR = (sum of w_i * sigma_i) / sigma_p:
 
 | Shown to user | Formula |
@@ -86,7 +102,7 @@ windows are a sensitivity check, not a confidence interval. DR² is an equivalen
 measure, not a literal count of independent risk factors; hedges can lift it above
 the holding count. DR follows Choueifaty & Coignard (2008), *Toward Maximum Diversification*.
 
-* **Normal window:** last 5 years of daily returns by default (3 / 5 / 7 selectable).
+* **Historical lookback:** last 5 years of daily returns by default (3 / 5 / 7 selectable), including sell-offs.
 * **Stress windows:** S&P 500 peak close to trough close, so 19 Feb - 23 Mar 2020 (COVID) and
   3 Jan - 12 Oct 2022 (inflation shock and Russia-Ukraine war); plus a custom date range.
 * **Small samples:** with fewer than 3 trading days per holding, correlations are shrunk toward

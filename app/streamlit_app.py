@@ -12,9 +12,14 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from engine.runtime import load_engine  # noqa: E402
+
+_, ENGINE_REVISION = load_engine()
 from engine import STRESS_SCENARIOS, analyze, custom_window  # noqa: E402
 from engine.data import PriceStore, load_universe, normalize_ticker  # noqa: E402
+from engine.correlation import average_pairwise, rolling_correlation  # noqa: E402
 from engine.scenarios import DEFAULT_LOOKBACK, LOOKBACK_CHOICES  # noqa: E402
+from app.whatif_tab import render_whatif  # noqa: E402
 
 st.set_page_config(page_title="Diversification X-Ray", page_icon=":material/donut_small:", layout="wide")
 
@@ -37,7 +42,7 @@ CORR_SCALE = [[0, "#184f95"], [0.25, "#6da7ec"], [0.5, "#e4e3df"], [0.75, "#f3a5
 
 # --- cached data / computation ------------------------------------------------
 @st.cache_resource
-def price_store() -> PriceStore:
+def price_store(engine_revision: str) -> PriceStore:
     return PriceStore()
 
 
@@ -47,12 +52,14 @@ def universe() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner="Measuring correlations...")
-def run_analysis(holdings: tuple, value: float, lookback: int, custom: tuple | None):
-    """Cache the analysis including the score baseline and lookback comparison."""
+def run_analysis(holdings: tuple, value: float, lookback: int, custom: tuple | None,
+                 engine_revision: str):
+    """Cache scores, rolling-price history and matched pre-period correlations."""
     stress = list(STRESS_SCENARIOS.values())
     if custom:
         stress.append(custom_window(*custom))
-    return analyze(dict(holdings), value=value, lookback_years=lookback, stress=stress, store=price_store())
+    return analyze(dict(holdings), value=value, lookback_years=lookback, stress=stress,
+                   store=price_store(engine_revision))
 
 
 # --- formatting helpers ---------------------------------------------------------
@@ -95,21 +102,24 @@ def cell_text_color(v: float) -> str:
     return "#ffffff" if abs(v) > 0.6 else "#0b0b0b"
 
 
-def correlation_heatmap(corr: pd.DataFrame) -> go.Figure:
+def correlation_heatmap(corr: pd.DataFrame, change: bool = False) -> go.Figure:
     scale = CORR_SCALE
     z = corr.to_numpy().copy()
     np.fill_diagonal(z, np.nan)                          # self-correlation carries no information
+    limit = 2 if change else 1
     fig = go.Figure(go.Heatmap(
-        z=z, x=corr.columns, y=corr.index, zmin=-1, zmax=1, colorscale=scale, xgap=2, ygap=2,
+        z=z, x=corr.columns, y=corr.index, zmin=-limit, zmax=limit, colorscale=scale, xgap=2, ygap=2,
         hovertemplate="%{y} vs %{x}: %{z:.2f}<extra></extra>",
-        colorbar=dict(title="Correlation", thickness=10, tickvals=[-1, 0, 1]),
+        colorbar=dict(title="Δ correlation" if change else "Correlation", thickness=10,
+                      tickvals=[-limit, 0, limit]),
     ))
     if len(corr) <= 10:   # per-cell values only while they fit; hover + table view cover the rest
         for i, row in enumerate(corr.index):
             for j, col in enumerate(corr.columns):
                 if i != j:
-                    fig.add_annotation(x=col, y=row, text=f"{z[i, j]:.2f}", showarrow=False,
-                                       font=dict(size=12, color=cell_text_color(z[i, j])))
+                    label = f"{z[i, j]:+.2f}" if change else f"{z[i, j]:.2f}"
+                    fig.add_annotation(x=col, y=row, text=label, showarrow=False,
+                                       font=dict(size=12, color=cell_text_color(z[i, j] / limit)))
     fig.update_yaxes(autorange="reversed", showgrid=False)
     fig.update_xaxes(showgrid=False, side="top")
     return base_layout(fig, 120 + 42 * len(corr))
@@ -144,9 +154,75 @@ def holding_returns_chart(res) -> go.Figure:
 
 
 # --- page sections -------------------------------------------------------------------
-def avg_corr(corr: pd.DataFrame) -> float:
-    z = corr.to_numpy()
-    return float(z[~np.eye(len(z), dtype=bool)].mean()) if len(z) > 1 else 1.0
+@st.cache_data
+def rolling_series(prices: pd.DataFrame, window: int, engine_revision: str) -> pd.Series:
+    return rolling_correlation(prices, window)
+
+
+def rolling_section(prices: pd.DataFrame):
+    st.subheader("Correlation over time")
+    if len(prices.columns) < 2:
+        st.info("Add at least two holdings to view rolling correlation.")
+        return
+    left, right = st.columns(2)
+    view = left.segmented_control("View", ["Portfolio average", "Selected pair"],
+                                  default="Portfolio average", key="rolling_view") or "Portfolio average"
+    window = right.segmented_control("Rolling window", [60, 120, 252], default=60,
+                                      format_func=lambda n: f"{n} days", key="rolling_window") or 60
+    selected = prices
+    if view == "Selected pair":
+        left, right = st.columns(2)
+        first = left.selectbox("First holding", prices.columns, key="rolling_first")
+        second = right.selectbox("Second holding", [t for t in prices if t != first], key="rolling_second")
+        selected = prices[[first, second]]
+    series = rolling_series(selected, window, ENGINE_REVISION)
+    series = series.loc[prices.index.max() - pd.DateOffset(years=7):]
+    if not series.notna().any():
+        st.info(f"Not enough complete history for a {window}-day correlation window.")
+        return
+    fig = go.Figure(go.Scatter(x=series.index, y=series, mode="lines", connectgaps=False,
+                               line=dict(color=COLORS["money"], width=2),
+                               hovertemplate="%{x|%d %b %Y}<br>Correlation: %{y:.2f}<extra></extra>"))
+    for key, scenario in STRESS_SCENARIOS.items():
+        if scenario.end >= series.index.min() and scenario.start <= series.index.max():
+            fig.add_vrect(x0=max(scenario.start, series.index.min()),
+                          x1=min(scenario.end, series.index.max()), fillcolor=COLORS["risk"],
+                          opacity=0.12, line_width=0, annotation_text="COVID" if key == "covid" else "2022",
+                          annotation_position="top left")
+    fig.update_yaxes(range=[-1, 1], title="Correlation")
+    st.plotly_chart(base_layout(fig, 300, showlegend=False), width="stretch", config=PLOTLY_CONFIG)
+    label = "Unweighted average of all distinct holding pairs" if view == "Portfolio average" else f"{first} vs {second}"
+    st.caption(f"{label} · {window} trailing daily returns · Last 7 years where available. "
+               "Shaded areas mark stress periods. Each point uses the same holdings and a complete window; "
+               "missing or constant data leaves gaps. Correlation does not measure allocation weights or losses.")
+
+
+def correlation_comparison(comparison):
+    st.subheader("How correlations changed")
+    if comparison.baseline is None or comparison.stress is None:
+        st.info(comparison.note)
+        return
+    baseline, stress = comparison.baseline, comparison.stress
+    view = st.segmented_control("Correlation period", ["Baseline", "Stress", "Change"],
+                                default="Stress", key="correlation_period",
+                                format_func=lambda v: {"Baseline": "Pre-period baseline",
+                                                       "Stress": "Stress period", "Change": "Change"}[v]) or "Stress"
+    matrices = {"Baseline": baseline.corr, "Stress": stress.corr,
+                "Change": stress.corr - baseline.corr}
+    st.plotly_chart(correlation_heatmap(matrices[view], change=view == "Change"),
+                    width="stretch", config=PLOTLY_CONFIG)
+    st.caption(f"Same {len(stress.corr)} holdings in both periods: {', '.join(stress.corr.columns)}. "
+               f"Pre-period baseline: {baseline.start:%d %b %Y}–{baseline.end:%d %b %Y} ({baseline.n_obs} returns). "
+               f"Stress: {stress.start:%d %b %Y}–{stress.end:%d %b %Y} ({stress.n_obs} returns).")
+    st.caption("Pre-period baseline uses the year immediately before the selected period, not the multi-year historical lookback. "
+               "It may include other sell-offs. Change = stress − pre-period baseline; red means higher correlation, blue means lower.")
+    st.caption("This matched comparison may use fewer holdings than the portfolio return and risk charts.")
+    if comparison.excluded:
+        st.caption(f"Excluded from this comparison: {', '.join(comparison.excluded)} "
+                   "(insufficient coverage or no measurable variation in one of the periods).")
+    for label, period in [("Pre-period baseline", baseline), ("Stress", stress)]:
+        if period.low_confidence:
+            st.caption(f"{label}: short sample; correlations shrunk {period.shrinkage:.0%} toward their average.")
 
 
 def headline(res, value: float):
@@ -268,7 +344,7 @@ def portfolio_sidebar():
         value = st.number_input("Portfolio value (US$)", min_value=100.0, value=10_000.0, step=1_000.0)
         lookback = st.segmented_control("Correlation lookback", LOOKBACK_CHOICES, default=DEFAULT_LOOKBACK,
                                         format_func=lambda y: f"{y} years",
-                                        help="Normal-market window of daily returns. 5 years balances a stable "
+                                        help="Historical window of daily returns, including sell-offs. 5 years balances a stable "
                                              "estimate against reflecting today's market.") or DEFAULT_LOOKBACK
     return holdings, value, lookback
 
@@ -277,13 +353,13 @@ def portfolio_sidebar():
 def main():
     holdings, value, lookback = portfolio_sidebar()
     st.title("Diversification X-Ray")
-    st.caption("How diversified is your portfolio really, in normal markets and when markets crash?")
+    st.caption("Explore your portfolio's diversification over its historical lookback and during market sell-offs.")
 
     if not holdings or sum(holdings.values()) <= 0:
         st.info("Add at least one holding with a positive weight in the sidebar.", icon=":material/arrow_back:")
         return
 
-    tab_normal, tab_stress = st.tabs(["Everyday markets", "Stress test"])
+    tab_normal, tab_stress, tab_whatif = st.tabs(["Historical overview", "Stress test", "What if: add one ETF"])
 
     with tab_stress:
         options = {**{k: s.label for k, s in STRESS_SCENARIOS.items()}, "custom": "Custom period"}
@@ -297,7 +373,7 @@ def main():
                 custom = (pd.Timestamp(picked[0]), pd.Timestamp(picked[1]))
 
     try:
-        result = run_analysis(tuple(sorted(holdings.items())), value, lookback, custom)
+        result = run_analysis(tuple(sorted(holdings.items())), value, lookback, custom, ENGINE_REVISION)
     except ValueError as e:
         st.error(str(e))
         return
@@ -307,6 +383,7 @@ def main():
     with tab_normal:
         res = result.normal
         st.caption(f"Measured over {res.start:%d %b %Y} - {res.end:%d %b %Y} ({res.n_obs:,} trading days).")
+        st.caption("Historical lookback includes sell-offs within these dates.")
         notes(res)
         duplicate_warning(res.tickers)
         headline(res, value)
@@ -321,7 +398,8 @@ def main():
             st.caption("1 = always move together, 0 = unrelated, -1 = move opposite. Red cells are where "
                        "diversification is missing.")
             st.plotly_chart(correlation_heatmap(res.corr), width="stretch", config=PLOTLY_CONFIG)
-        detail_table(res, "everyday markets")
+        detail_table(res, "historical overview")
+        rolling_section(result.correlation_prices)
 
     with tab_stress:
         key = "custom" if choice == "custom" else choice
@@ -330,13 +408,16 @@ def main():
         elif key not in result.stress:
             st.warning("Not enough overlapping price data for this period.")
         else:
-            stress_section(result.normal, result.stress[key], value)
+            stress_section(result.normal, result.stress[key], value, result.correlations[key])
+
+    with tab_whatif:
+        render_whatif(holdings, lookback, price_store(ENGINE_REVISION), value, ENGINE_REVISION)
 
     with st.expander("How we calculate this"):
         st.markdown(METHODOLOGY)
 
 
-def stress_section(normal, res, value: float):
+def stress_section(normal, res, value: float, comparison):
     st.caption(f"{res.scenario.description}  \n{res.start:%d %b %Y} - {res.end:%d %b %Y} "
                f"({res.n_obs} trading days).")
     notes(res)
@@ -346,12 +427,19 @@ def stress_section(normal, res, value: float):
                 f"**{money(value + loss)}** ({res.replay['total_return']:+.1%}).")
 
     a, b, c, d = st.columns(4)
-    a.metric("Equivalent bets (DR²)", bets_text(sm, n), delta=f"{sm['effective_bets'] - nm['effective_bets']:+.1f} vs normal",
+    a.metric("Equivalent bets (DR²)", bets_text(sm, n), delta=f"{sm['effective_bets'] - nm['effective_bets']:+.1f} vs lookback",
              border=True)
     b.metric("Risk removed by diversification", f"{sm['risk_reduction']:.0%}",
-             delta=f"{(sm['risk_reduction'] - nm['risk_reduction']) * 100:+.0f} pts vs normal", border=True)
-    c.metric("Avg. correlation of holdings", f"{avg_corr(res.corr):.2f}",
-             delta=f"{avg_corr(res.corr) - avg_corr(normal.corr):+.2f} vs normal", delta_color="inverse", border=True)
+             delta=f"{(sm['risk_reduction'] - nm['risk_reduction']) * 100:+.0f} pts vs lookback", border=True)
+    if comparison.baseline is not None and comparison.stress is not None:
+        before = average_pairwise(comparison.baseline.corr)
+        after = average_pairwise(comparison.stress.corr)
+        c.metric("Avg. correlation (matched)", f"{after:.2f}",
+                 delta=f"{after - before:+.2f} vs pre-period", delta_color="inverse", border=True,
+                 help="Unweighted pairwise mean using the same holdings in both periods. See the comparison below.")
+    else:
+        c.metric("Avg. correlation (matched)", "N/A", border=True,
+                 help="At least two holdings with enough usable history in both periods are required.")
     d.metric("Worst peak-to-trough fall", f"{res.replay['max_drawdown']:.1%}", border=True,
              help="Largest drop from a high point within the period.")
 
@@ -368,8 +456,7 @@ def stress_section(normal, res, value: float):
         st.subheader("Where your risk came from")
         st.plotly_chart(risk_vs_money_chart(res), width="stretch", config=PLOTLY_CONFIG)
     with right:
-        st.subheader("How your holdings moved together")
-        st.plotly_chart(correlation_heatmap(res.corr), width="stretch", config=PLOTLY_CONFIG)
+        correlation_comparison(comparison)
     detail_table(res, res.scenario.label)
 
 
@@ -387,9 +474,16 @@ If all holdings moved in lockstep the two would be equal (DR = 1).
 * **Share of risk** for each holding = its contribution to portfolio variance, wᵢ(Σw)ᵢ / σₚ². These add up to 100%.
 * **Bad year** = 1.645 × annual volatility × portfolio value, a 1-in-20 one-year loss under a normal approximation.
 
-**Windows.** Everyday markets use the last 3, 5 or 7 years (default 5). Stress tests run from the S&P 500's
+**Windows.** Historical overview uses the last 3, 5 or 7 years (default 5), including sell-offs. Stress tests run from the S&P 500's
 peak close to its trough close: COVID-19 (19 Feb - 23 Mar 2020) and the 2022 inflation shock and Russia-Ukraine
 war (3 Jan - 12 Oct 2022). The stress replay is buy-and-hold from the starting weights.
+
+**Correlation comparison.** Pre-period baseline is the year immediately before the selected period, distinct from
+the multi-year historical lookback and not necessarily crisis-free. Both heatmaps use the
+same holdings with at least 95% price coverage and measurable return variation in both windows.
+The correlation delta uses this matched set; portfolio return and risk metrics above use the scenario portfolio.
+Rolling correlation uses complete 60 / 120 / 252-day return windows, with an unweighted pairwise mean or a selected pair.
+Missing or constant data leaves gaps. Simultaneous losses do not necessarily imply high daily correlation.
 
 **Small samples.** When a window has fewer than 3 trading days per holding, correlations are shrunk toward their
 average (Ledoit & Wolf, 2004) and flagged as low confidence. Shrinking toward the average rather than toward zero
@@ -397,6 +491,12 @@ avoids making a short crash look more diversified than it was.
 
 **Source.** Choueifaty & Coignard (2008), [Toward Maximum Diversification](https://www.tobam.fr/wp-content/uploads/2014/12/TOBAM-JoPM-Maximum-Div-2008.pdf),
 defines DR. We use DR² as an equivalent-bets interpretation of the volatility reduction.
+
+**What if.** Each candidate is tested at 5-40% of the portfolio, with existing holdings scaled down pro-rata:
+w' = (1 − α)·w + α·e_k. Expected return uses CAPM, E(Rᵢ) = r_f + βᵢ × market risk premium, with β against VT over the
+historical lookback and r_f from the trailing 12-month return of BIL. The robustness check resamples that window in
+21-day blocks 200 times. Buying US$A with new money on a portfolio worth US$V gives the same mix as α = A / (V + A);
+dollar losses use the portfolio value after the purchase.
 """
 
 main()
