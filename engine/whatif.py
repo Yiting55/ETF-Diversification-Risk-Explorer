@@ -180,12 +180,14 @@ def ranking_table(wi: WhatIf, window: str = "normal", alpha: float = ALPHA_DEFAU
     tbl["best_alpha"] = best["alpha"]
     tbl["bets_at_best"] = best["bets"]
     y = "d_er" if window == "normal" else "d_max_dd"
-    tbl = mark_pareto(tbl, "d_bets", y).sort_values(rank_by, ascending=False)
-    tbl["held"] = [wi.held.get(k, "") for k in tbl.index]
     crises = crisis_effects(wi, alpha).reindex(tbl.index)
-    for key in crises.columns.drop("all_crises"):
+    keys = list(crises.columns.drop("all_crises"))
+    for key in keys:
         tbl[f"dd_{key}"] = crises[key]
     tbl["all_crises"] = crises["all_crises"].fillna(False).astype(bool)
+    tbl["worst_crisis"] = crises[keys].min(axis=1, skipna=False) if keys else np.nan
+    tbl = mark_pareto(tbl, "d_bets", y).sort_values(rank_by, ascending=False, na_position="last")
+    tbl["held"] = [wi.held.get(k, "") for k in tbl.index]
     tbl.insert(0, "rank", range(1, len(tbl) + 1))
     return tbl
 
@@ -252,6 +254,13 @@ def summary_sentence(wi: WhatIf, tbl: pd.DataFrame, window: str, alpha: float,
     held = f" (you {wi.held[k].replace('already held', 'already hold it')})" if k in wi.held else ""
     move = f"Moving {alpha:.0%} of the portfolio into {k} ({name}){held}"
     bets = f"equivalent bets go from {cur['effective_bets']:.1f} to {row['bets']:.1f}"
+
+    if rank_by == "worst_crisis":
+        worst = row["worst_crisis"]
+        if not worst > 0:
+            return "At this weight, none of the candidate ETFs would have softened every past crisis tested."
+        return (f"{move} would have made the worst fall shallower in every crisis tested, by at least "
+                f"{worst * 100:.1f} pts; {bets}.")
 
     if rank_by == "d_max_dd":
         if row["d_max_dd"] <= 0.001:
@@ -350,3 +359,62 @@ def purchase_sentence(pc: PurchaseCheck) -> str:
     else:
         alt = f". None of the alternatives adds more bets than {pc.ticker} at this amount."
     return head + alt
+
+
+def purchase_record(pc: PurchaseCheck, as_of: str | None = None) -> str:
+    """Plain-text record of a pre-trade check: inputs, impact and the alternatives considered."""
+    wi, n = pc.wi, pc.wi.base["normal"]
+    labels = {"normal": "Historical lookback", **{k: v.label for k, v in STRESS_SCENARIOS.items()}}
+    lines = [
+        "PRE-TRADE DIVERSIFICATION CHECK",
+        f"Generated: {as_of or f'{pd.Timestamp.now():%Y-%m-%d %H:%M}'}",
+        f"Price data to: {wi.prices.index.max():%Y-%m-%d}",
+        "",
+        "PORTFOLIO",
+        f"Value before purchase: ${pc.value:,.0f}",
+        *[f"  {t:<8}{w:>7.1%}" for t, w in wi.holdings.sort_values(ascending=False).items()],
+        "",
+        "PLANNED PURCHASE",
+        f"{pc.ticker} ({pc.name}): ${pc.amount:,.0f}, {pc.alpha:.1%} of the portfolio after purchase",
+        *([f"Note: {wi.held[pc.ticker]}"] if pc.ticker in wi.held else []),
+        "",
+        "IMPACT",
+        f"{'Period':<46}{'Equiv. bets':>14}{'Worst fall':>18}{'Worst fall (US$)':>22}",
+    ]
+    for key, r in pc.impact.iterrows():
+        if np.isnan(r["bets_after"]):
+            lines.append(f"{labels.get(key, key):<46}{'n/a':>14}")
+            continue
+        lines.append(f"{labels.get(key, key):<46}"
+                     f"{r['bets_before']:>6.2f} -> {r['bets_after']:<5.2f}"
+                     f"{r['dd_before']:>8.1%} -> {r['dd_after']:<7.1%}"
+                     f"{r['loss_before']:>10,.0f} -> {r['loss_after']:<9,.0f}")
+    tbl = ranking_table(wi, "normal", pc.alpha)
+    crisis_cols = [c for c in tbl.columns if c.startswith("dd_") and c[3:] in STRESS_SCENARIOS]
+    lines += ["", f"ALTERNATIVES CONSIDERED (same ${pc.amount:,.0f})",
+              f"{'Ticker':<8}{'Equiv. bets':>12}{'Change':>9}"
+              + "".join(f"{'Fall ' + c[3:].upper():>13}" for c in crisis_cols) + f"{'Both crises':>13}"]
+    for k, r in tbl.iterrows():
+        mark = " *" if k == pc.ticker else ""
+        lines.append(f"{k + mark:<8}{r['bets']:>12.2f}{r['d_bets']:>+9.2f}"
+                     + "".join(f"{_pts(r[c]):>13}" for c in crisis_cols)
+                     + f"{('yes' if r['all_crises'] else 'no'):>13}")
+    lines += [
+        "* planned purchase. Fall = change in worst fall (+ = shallower).",
+        "",
+        "METHOD",
+        f"Equivalent bets = DR^2, DR = sum(w_i * sigma_i) / sigma_p, daily returns "
+        f"{n.start:%Y-%m-%d} to {n.end:%Y-%m-%d}.",
+        "Stress windows (S&P 500 peak to trough): " + "; ".join(
+            f"{v.start:%Y-%m-%d} to {v.end:%Y-%m-%d}" for v in STRESS_SCENARIOS.values()) + ".",
+        f"Expected return (CAPM): rf {wi.rf:.2%}, market risk premium {wi.mrp:.1%}, beta vs VT.",
+        "Historical comparison only; not a recommendation.",
+    ]
+    return "\n".join(line.rstrip() for line in lines) + "\n"
+
+
+def _pts(x: float) -> str:
+    if pd.isna(x):
+        return "n/a"
+    v = round(x * 100, 1)
+    return "0.0 pts" if v == 0 else f"{v:+.1f} pts"

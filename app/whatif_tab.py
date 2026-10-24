@@ -164,11 +164,13 @@ def _render_compare(key: tuple, lookback: int, store, rev: str):
     color = {k: v["color"] for k, v in style.items()}
     base = wi.base[window]
     normal = window == "normal"
-    rank_by = "d_bets"
-    if not normal:
-        labels = {"d_bets": "Most added bets", "d_max_dd": "Shallowest fall"}
-        rank_by = st.segmented_control("Rank by", labels, format_func=labels.get, default="d_bets",
-                                       key="wi_rank_by") or "d_bets"
+    labels = ({"d_bets": "Most added bets", "worst_crisis": "Most crisis-proof"} if normal
+              else {"d_bets": "Most added bets", "d_max_dd": "Shallowest fall"})
+    rank_by = st.segmented_control("Rank by", labels, format_func=labels.get, default="d_bets",
+                                   key=f"wi_rank_by_{'normal' if normal else 'stress'}") or "d_bets"
+    if rank_by == "worst_crisis":
+        st.caption("Most crisis-proof = ranked by the smaller improvement in worst fall across COVID 2020 "
+                   "and the 2022 sell-off, so a candidate only ranks high if it helped in both.")
     tbl = wf.ranking_table(wi, window, alpha, rank_by)
 
     st.caption(f"{base.start:%d %b %Y} - {base.end:%d %b %Y} ({base.n_obs:,} trading days). "
@@ -314,6 +316,10 @@ def _render_purchase(key: tuple, lookback: int, store, value: float, rev: str):
     if held:
         st.caption(f"Note: you {held.replace('already held', 'already hold it')}.")
     st.info(wf.purchase_sentence(pc), icon=":material/lightbulb:")
+    st.download_button("Download check record", wf.purchase_record(pc),
+                       file_name=f"pretrade_check_{pc.ticker}_{pd.Timestamp.now():%Y%m%d}.txt",
+                       mime="text/plain", icon=":material/download:", key="wi_buy_record",
+                       help="Inputs, impact in each period and the alternatives considered, as a plain-text record.")
     imp = pc.impact
     cards = st.columns(len(imp))
     for col, (win, r) in zip(cards, imp.iterrows()):

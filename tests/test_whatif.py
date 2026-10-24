@@ -213,3 +213,23 @@ def test_crisis_effects_flag_requires_every_stress_window(wi):
     t = ranking_table(wi, "normal", 0.1)
     assert (t["all_crises"] == c.loc[t.index, "all_crises"]).all()
     assert t.loc["IEF", "dd_2022"] == pytest.approx(ranking_table(wi, "2022", 0.1).loc["IEF", "d_max_dd"])
+
+
+def test_rank_by_worst_crisis(wi):
+    t = ranking_table(wi, "normal", 0.1, rank_by="worst_crisis")
+    expected = t[["dd_covid", "dd_2022"]].min(axis=1)
+    assert (t["worst_crisis"] == expected).all()
+    assert t["worst_crisis"].dropna().is_monotonic_decreasing
+    from engine.whatif import summary_sentence
+    assert "crisis" in summary_sentence(wi, t, "normal", 0.1, rank_by="worst_crisis")
+
+
+def test_purchase_record_lists_inputs_and_alternatives():
+    from engine.whatif import check_purchase, purchase_record
+    pc = check_purchase({"VOO": 60, "QQQ": 40}, "TLT", 2_500, value=10_000, store=FakeStore())
+    text = purchase_record(pc, as_of="2026-10-24 10:00")
+    assert "Generated: 2026-10-24 10:00" in text
+    assert "TLT" in text and "$2,500" in text and "Both crises" in text
+    for k in pc.wi.candidates:
+        assert any(line.startswith(k) for line in text.splitlines())
+    assert "not a recommendation" in text
