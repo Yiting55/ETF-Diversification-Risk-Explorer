@@ -46,7 +46,7 @@ def price_store(engine_revision: str) -> PriceStore:
     return PriceStore()
 
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def universe() -> pd.DataFrame:
     return load_universe().set_index("yf_symbol")
 

@@ -117,7 +117,7 @@ def _defaults() -> dict:
     return wf.CANDIDATE_SETS[wf.DEFAULT_REGION]
 
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def _universe() -> pd.DataFrame:
     return edata.load_universe().set_index("yf_symbol")
 
