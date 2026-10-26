@@ -433,3 +433,41 @@ def _pts(x: float) -> str:
         return "n/a"
     v = round(x * 100, 1)
     return "0.0 pts" if v == 0 else f"{v:+.1f} pts"
+
+
+def purchase_summary(pc: PurchaseCheck) -> dict:
+    """Structured result of a pre-trade check, shared by the API and the order-ticket demo."""
+    periods = {}
+    for key, r in pc.impact.iterrows():
+        def num(x):
+            return None if pd.isna(x) else round(float(x), 4)
+        periods[key] = {
+            "label": r["label"],
+            "bets_before": num(r["bets_before"]), "bets_after": num(r["bets_after"]),
+            "volatility_before": num(r["vol_before"]), "volatility_after": num(r["vol_after"]),
+            "worst_fall_before": num(r["dd_before"]), "worst_fall_after": num(r["dd_after"]),
+            "worst_fall_usd_before": num(r["loss_before"]), "worst_fall_usd_after": num(r["loss_after"]),
+        }
+    tbl = ranking_table(pc.wi, "normal", pc.alpha)
+    alt = tbl.drop(index=pc.ticker, errors="ignore")
+    robust = alt[alt["all_crises"]]
+    best = (robust if not robust.empty else alt).index[0] if not alt.empty else None
+    pick = tbl.loc[pc.ticker] if pc.ticker in tbl.index else None
+    return {
+        "ticker": pc.ticker,
+        "name": pc.name,
+        "amount": pc.amount,
+        "portfolio_value": pc.value,
+        "share_of_portfolio_after": round(pc.alpha, 4),
+        "already_held": pc.wi.held.get(pc.ticker, ""),
+        "change_in_bets": None if pick is None else round(float(pick["d_bets"]), 4),
+        "softened_all_crises": None if pick is None else bool(pick["all_crises"]),
+        "periods": periods,
+        "best_alternative": None if best is None else {
+            "ticker": best,
+            "name": pc.wi.candidates.get(best, best),
+            "bets_after": round(float(tbl.loc[best, "bets"]), 4),
+            "softened_all_crises": bool(tbl.loc[best, "all_crises"]),
+        },
+        "data_to": f"{pc.wi.prices.index.max():%Y-%m-%d}",
+    }
