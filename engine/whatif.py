@@ -8,7 +8,7 @@ import pandas as pd
 
 from .analyze import DAYS_PER_HOLDING, WindowResult, analyze_window, clean_holdings
 from .data import PriceStore, load_universe, normalize_ticker
-from .metrics import diversification_metrics
+from .metrics import diversification_metrics, replay
 from .scenarios import DEFAULT_LOOKBACK, STRESS_SCENARIOS, Scenario, normal_window
 
 CANDIDATE_SETS: dict[str, dict[str, str]] = {
@@ -73,7 +73,16 @@ class WhatIf:
     holdings: pd.Series | None = None
 
 
-def _row(win_key, k, a, res: WindowResult, er: pd.Series | None) -> dict:
+@dataclass
+class _Measured:
+    tickers: list[str]
+    weights: np.ndarray
+    metrics: dict
+    replay: dict
+    low_confidence: bool
+
+
+def _row(win_key, k, a, res, er: pd.Series | None) -> dict:
     m = res.metrics
     exp = float(pd.Series(res.weights, index=res.tickers).mul(er.reindex(res.tickers)).sum()) if er is not None else np.nan
     return {"window": win_key, "candidate": k, "alpha": a,
@@ -124,17 +133,23 @@ def run_whatif(holdings: dict[str, float], lookback_years: int = DEFAULT_LOOKBAC
         er_s = er if align else None
         rows.append(_row(s.key, "(current)", 0.0, b, er_s))
         for k in candidates:
-            for a in alphas:
-                r = analyze_window(prices, new_weights(w, k, a), s, value, align_start=align, shrink=shrink)
-                if r is None or k in r.excluded:
-                    unavailable[f"{s.key}:{k}"] = (r.excluded.get(k) if r else "not enough data")
-                    break
-                if r.start != b.start or r.end != b.end:
-                    msg = (f"{k} is measured from {r.start:%d %b %Y} (its first price), "
-                           f"not {b.start:%d %b %Y}.")
-                    if msg not in notes[s.key]:
-                        notes[s.key].append(msg)
-                rows.append(_row(s.key, k, a, r, er_s))
+            r = analyze_window(prices, new_weights(w, k, alphas[0]), s, value, align_start=align, shrink=shrink)
+            if r is None or k in r.excluded:
+                unavailable[f"{s.key}:{k}"] = (r.excluded.get(k) if r else "not enough data")
+                continue
+            if r.start != b.start or r.end != b.end:
+                notes[s.key].append(f"{k} is measured from {r.start:%d %b %Y} (its first price), "
+                                    f"not {b.start:%d %b %Y}.")
+            rows.append(_row(s.key, k, alphas[0], r, er_s))
+            # The covariance and dates do not depend on the weight, so reuse them for the other weights.
+            vols = r.metrics["asset_vols"]
+            cov = r.corr.to_numpy() * np.outer(vols, vols)
+            px = prices.loc[r.start:r.end, r.tickers].dropna()
+            for a in alphas[1:]:
+                wa = new_weights(w, k, a).reindex(r.tickers)
+                wa = (wa / wa.sum()).to_numpy()
+                m = diversification_metrics(wa, cov)
+                rows.append(_row(s.key, k, a, _Measured(r.tickers, wa, m, replay(px, wa), r.low_confidence), er_s))
 
     if "normal" not in base:
         raise ValueError("Not enough overlapping price history to measure correlations.")

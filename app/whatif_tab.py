@@ -34,20 +34,31 @@ HELP = {
     "er": "CAPM estimate: risk-free rate + beta × market risk premium, with beta measured against VT "
           "(global stocks). A model estimate, not a forecast.",
     "dd": "Largest drop from a high point within the period, holding the starting weights.",
-    "table": "Each row moves the chosen share into one candidate and measures the portfolio again.",
-    "curve": "Equivalent bets as the share moved goes from 0% to 40%. Where a line flattens, "
-             "moving more adds little extra diversification.",
-    "cost": "Gain in equivalent bets against the change in CAPM expected return. Up and to the right is better.",
-    "protect": "Gain in equivalent bets against the change in worst fall in this crisis. "
-               "Points below zero made the fall deeper.",
+    "table": "Each row moves the chosen share into one candidate and measures the portfolio again. "
+             "Green means better than today, red means worse. Hover over a column name for its definition.",
+    "curve": "Each line is one ETF. Moving right puts more of the portfolio into it; higher means more "
+             "diversified. The dotted line is your portfolio today. Where a line flattens, moving more adds "
+             "little extra diversification.",
+    "cost": "Each dot is one ETF. Right = more diversified; higher = more expected return kept. "
+            "Filled dots are efficient; hollow dots are beaten by another option on both.",
+    "protect": "Each dot is one ETF. Right = more diversified; higher = smaller fall in this crash. "
+               "A dot far right but below zero added diversification without reducing the loss. "
+               "Filled dots are efficient; hollow dots are beaten by another option on both.",
     "robust": "Resamples the daily history in 21-day blocks, 200 times, and ranks the candidates again each time. "
               "A high share means the top pick does not depend on one particular stretch of history.",
-    "amount": "New money you plan to invest. Your current portfolio value comes from the sidebar.",
+    "amount": "New money you plan to invest. Your current portfolio value comes from the sidebar. "
+              "Buying with new money gives the same mix as moving that share out of your current holdings.",
+    "quick": "Common picks to try with one click.",
+    "robust_btn": "Resamples the daily history in 21-day blocks, 200 times, and ranks the candidates again each "
+                  "time. A long bar means that ETF stays the top pick across many versions of history.",
     "buy_ticker": "Any US stock or ETF, including ones you already hold.",
     "card": "Equivalent bets before and after the purchase in this period.",
-    "before_after": "Your portfolio before and after the purchase, in each period.",
-    "elsewhere": "The same amount put into each default candidate instead, measured the same way. "
-                 "Your pick is striped.",
+    "before_after": "Your portfolio before and after the purchase, in each period. For the historical overview, "
+                    "worst fall is measured over your whole lookback window. Dollar figures use the portfolio value "
+                    "before and after the purchase, so a bigger portfolio can lose more dollars even when its "
+                    "percentage fall is smaller.",
+    "elsewhere": "Each bar shows your portfolio after putting the same amount into that ETF instead. "
+                 "Longer = more diversified. Your pick is striped; the dotted line is today.",
     "compare_in": "Period used for the comparison. In a crisis period the alternatives are ranked by shallower fall.",
 }
 
@@ -56,8 +67,8 @@ COLUMN_HELP = {
     "ETF": "Candidate ETF. 'already held' means you own it or a near-identical fund, so its weight goes up.",
     "Bets after": "Equivalent bets after adding this ETF.",
     "Δ bets": "Change in equivalent bets compared with now. Higher means more diversified.",
-    "Δ volatility": "Change in annualised volatility, in percentage points.",
-    "Δ expected return": "Change in CAPM expected return per year, in percentage points. Often negative, "
+    "Δ vol": "Change in volatility (annualised), in percentage points. Negative means a calmer portfolio.",
+    "Δ return": "Change in expected return per year (CAPM), in percentage points. Often negative, "
                          "because diversifiers usually have lower beta.",
     "Δ worst fall": "Change in the worst fall in this period, in percentage points. Positive means a shallower fall.",
     "Δ fall COVID": "Change in the worst fall during COVID 2020 at the same share. Positive means shallower.",
@@ -75,9 +86,31 @@ COLUMN_HELP = {
 }
 
 
+GOOD, BAD = "#0ca30c", "#d03b3b"
+# +1: a positive change is better; -1: a negative change is better
+DIRECTION = {"Δ bets": 1, "Δ return": 1, "Δ worst fall": 1, "Δ fall COVID": 1, "Δ fall 2022": 1,
+             "Δ vol": -1}
+
+
+def _tone(value, direction: int) -> str:
+    text = str(value).strip()
+    if not text or text in ("n/a", "0.0 pts", "+0.00", "0.00 pts"):
+        return ""
+    sign = -1 if text.startswith("-") else 1 if text.startswith("+") else 0
+    if sign == 0:
+        return ""
+    return f"color: {GOOD if sign * direction > 0 else BAD}"
+
+
 def _table(df: pd.DataFrame):
-    config = {c: st.column_config.Column(c, help=COLUMN_HELP[c]) for c in df.columns if c in COLUMN_HELP}
-    st.dataframe(df, hide_index=True, width="stretch", column_config=config)
+    widths = {"Rank": "small", "ETF": "medium"}
+    config = {c: st.column_config.Column(f"{c} ⓘ", help=COLUMN_HELP[c], width=widths.get(c))
+              for c in df.columns if c in COLUMN_HELP}
+    styler = df.style
+    for col, direction in DIRECTION.items():
+        if col in df.columns:
+            styler = styler.map(lambda v, d=direction: _tone(v, d), subset=[col])
+    st.dataframe(styler, hide_index=True, width="stretch", column_config=config)
 
 
 def _defaults() -> dict:
@@ -186,8 +219,11 @@ def _ticker_picker(label: str, key: str, exclude=(), multi=False, help=None):
 
 
 def render_whatif(holdings: dict, lookback: int, store, value: float = 10_000, engine_revision: str = ""):
-    mode = st.segmented_control("Mode", ["Compare ETFs", "Check a purchase"], default="Compare ETFs",
-                                key="wi_mode", label_visibility="collapsed") or "Compare ETFs"
+    mode = st.segmented_control(
+        "What do you want to do?", ["Compare ETFs", "Check a purchase"], default="Compare ETFs", key="wi_mode",
+        help="Compare ETFs: move part of your portfolio into one more ETF and see which one diversifies it most. "
+             "Check a purchase: see what something you plan to buy does to your portfolio before you buy it. "
+             "Both use real historical prices; this is a comparison of the past, not advice.") or "Compare ETFs"
     key = tuple(sorted(holdings.items()))
     if mode == "Check a purchase":
         _render_purchase(key, lookback, store, value, engine_revision)
@@ -196,9 +232,6 @@ def render_whatif(holdings: dict, lookback: int, store, value: float = 10_000, e
 
 
 def _render_compare(key: tuple, lookback: int, store, rev: str):
-    st.caption("Test moving part of your portfolio into one more ETF. Existing holdings are scaled down "
-               "pro-rata, so the total amount invested stays the same. A historical comparison, not advice.")
-
     c1, c2, c3 = st.columns([4, 3, 2])
     with c1:
         window = st.segmented_control("Measured in", WINDOWS, format_func=WINDOWS.get, default="normal",
@@ -268,12 +301,12 @@ def _render_compare(key: tuple, lookback: int, store, rev: str):
         "Rank": tbl["rank"],
         "ETF": [f"{k} · {wi.candidates.get(k, k)}" + (f" ({tbl.at[k, 'held']})" if tbl.at[k, "held"] else "")
                 for k in tbl.index],
-        "Bets after": tbl["bets"].round(2),
+        "Bets after": tbl["bets"].map(lambda x: f"{x:.2f}"),
         "Δ bets": tbl["d_bets"].map(lambda x: f"{x:+.2f}"),
-        "Δ volatility": tbl["d_vol"].map(_pts),
+        "Δ vol": tbl["d_vol"].map(_pts),
     }
     if normal:
-        cols["Δ expected return"] = tbl["d_er"].map(lambda x: _pts(x, 2))
+        cols["Δ return"] = tbl["d_er"].map(lambda x: _pts(x, 2))
     else:
         cols["Δ worst fall"] = tbl["d_max_dd"].map(_pts)
     if normal:
@@ -285,7 +318,6 @@ def _render_compare(key: tuple, lookback: int, store, rev: str):
     cols["Both crises"] = tbl["all_crises"].map({True: "Yes", False: ""})
     _table(pd.DataFrame(cols))
     st.markdown(_crisis_line(tbl))
-    st.caption("Hover over a column name for its definition. Positive changes in worst fall mean a shallower drop.")
 
     left, right = st.columns(2)
     with left:
@@ -329,28 +361,32 @@ def _render_compare(key: tuple, lookback: int, store, rev: str):
         _layout(fig2, 400, showlegend=False, xaxis=dict(title="Change in equivalent bets"),
                 yaxis=dict(title=y_title))
         st.plotly_chart(fig2, width="stretch", config=PLOTLY_CONFIG)
-        st.caption("Filled dots are efficient. Up and to the right is better."
-                   + ("" if normal else " More bets does not always mean a smaller loss."))
 
     if normal:
-        st.subheader("Is the ranking robust?", help=HELP["robust"])
-        st.caption("Resamples the daily history 200 times in 21-day blocks and counts how often each ETF "
-                   "adds the most bets.")
-        if st.button("Run robustness check", key="wi_boot"):
-            stab = _stability(key, lookback, mrp, rf, tuple(candidates.items()), alpha, store, rev)
-            fig3 = go.Figure(go.Bar(x=stab.values, y=stab.index, orientation="h",
-                                    marker=dict(color=[color.get(k, MUTED) for k in stab.index]),
-                                    text=[f"{v:.0%}" for v in stab.values], textposition="outside",
-                                    hovertemplate="%{y}: ranked first in %{x:.0%} of resamples<extra></extra>"))
-            _layout(fig3, 280, xaxis=dict(tickformat=".0%", range=[0, 1.12], title="Share of resamples ranked first"),
-                    yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig3, width="stretch", config=PLOTLY_CONFIG)
+        with st.expander("Is the ranking robust?", icon=":material/insights:"):
+            if st.button("Run robustness check", key="wi_boot", help=HELP["robust_btn"]):
+                stab = _stability(key, lookback, mrp, rf, tuple(candidates.items()), alpha, store, rev)
+                fig3 = go.Figure(go.Bar(x=stab.values, y=stab.index, orientation="h",
+                                        marker=dict(color=[color.get(k, MUTED) for k in stab.index]),
+                                        text=[f"{v:.0%}" for v in stab.values], textposition="outside",
+                                        hovertemplate="%{y}: ranked first in %{x:.0%} of resamples<extra></extra>"))
+                _layout(fig3, 280, xaxis=dict(tickformat=".0%", range=[0, 1.12],
+                                              title="Share of resamples ranked first"),
+                        yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig3, width="stretch", config=PLOTLY_CONFIG)
+
+
+QUICK_PICKS = ["QQQ", "VOO", "GLD", "IEF", "DBC"]
+
+
+def _use_quick_pick():
+    pick = st.session_state.get("wi_buy_quick")
+    if pick:
+        st.session_state["wi_buy_ticker"] = pick
+        st.session_state["wi_buy_quick"] = None
 
 
 def _render_purchase(key: tuple, lookback: int, store, value: float, rev: str):
-    st.caption("Before you buy: see what a planned purchase does to your diversification, over your historical "
-               "lookback and in past crashes, and how the same amount would do elsewhere. "
-               "A historical comparison, not advice.")
     c1, c2, c3 = st.columns([4, 2, 2])
     with c1:
         ticker = _ticker_picker("I plan to buy", "wi_buy_ticker", help=HELP["buy_ticker"])
@@ -359,6 +395,7 @@ def _render_purchase(key: tuple, lookback: int, store, value: float, rev: str):
                                  help=HELP["amount"])
     with c3:
         mrp, rf = _assumptions()
+    st.pills("Quick picks", QUICK_PICKS, key="wi_buy_quick", on_change=_use_quick_pick, help=HELP["quick"])
     if not ticker:
         st.info("Pick the stock or ETF you are about to buy.", icon=":material/search:")
         return
@@ -369,9 +406,8 @@ def _render_purchase(key: tuple, lookback: int, store, value: float, rev: str):
         st.error(str(e))
         return
 
-    st.caption(f"Your portfolio is worth {_money(value)} (sidebar). After the purchase it is worth "
-               f"{_money(value + amount)}, and the new {pc.ticker} purchase is {pc.alpha:.1%} of that. "
-               "Buying with new money gives the same mix as moving that share out of your current holdings.")
+    st.caption(f"Portfolio value {_money(value)} → {_money(value + amount)}; {pc.ticker} purchase is "
+               f"{pc.alpha:.1%} of the total.")
     held = pc.wi.held.get(pc.ticker)
     if held:
         st.caption(f"Note: you {held.replace('already held', 'already hold it')}.")
@@ -404,9 +440,6 @@ def _render_purchase(key: tuple, lookback: int, store, value: float, rev: str):
                                        if win == "normal" and not np.isnan(r["er_after"]) else ""),
         })
     _table(pd.DataFrame(rows))
-    st.caption("Historical overview: worst fall over the lookback window. Dollar figures use your portfolio "
-               "value before and after the purchase, so a bigger portfolio can lose more dollars even "
-               "when its percentage fall is smaller.")
     st.subheader(f"The same {_money(amount)} elsewhere", help=HELP["elsewhere"])
     window = st.segmented_control("Compare in", WINDOWS, format_func=WINDOWS.get, default="normal",
                                   key="wi_buy_window", help=HELP["compare_in"]) or "normal"
