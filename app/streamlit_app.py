@@ -19,6 +19,7 @@ from engine import STRESS_SCENARIOS, analyze, custom_window  # noqa: E402
 from engine.data import PriceStore, load_universe, normalize_ticker  # noqa: E402
 from engine.correlation import average_pairwise, rolling_correlation  # noqa: E402
 from engine.scenarios import DEFAULT_LOOKBACK, LOOKBACK_CHOICES  # noqa: E402
+from engine.risk_contributions import calculate_risk_contributions  # noqa: E402
 from app.whatif_tab import render_whatif  # noqa: E402
 
 st.set_page_config(page_title="Diversification X-Ray", page_icon=":material/donut_small:", layout="wide")
@@ -95,6 +96,22 @@ def risk_vs_money_chart(res) -> go.Figure:
     fig.update_layout(barmode="group", bargap=0.35, bargroupgap=0.08, legend_traceorder="reversed")
     fig.update_xaxes(tickformat=".0%", rangemode="tozero")
     return base_layout(fig, 90 + 46 * len(df))
+
+
+def risk_mismatch_insight(res) -> str:
+    """Describe the largest absolute gap between a holding's money and risk shares."""
+    df = pd.DataFrame({"money": res.weights, "risk": res.metrics["risk_share"]}, index=res.tickers)
+    if df.empty:
+        return ""
+    ticker = (df["risk"] - df["money"]).abs().idxmax()
+    row = df.loc[ticker]
+    gap = row["risk"] - row["money"]
+    if abs(gap) < 0.05:
+        return "Risk contributions are broadly in line with capital weights across holdings."
+    direction = "more" if gap > 0 else "less"
+    return (f"**Risk concentration mismatch:** {ticker} represents **{row['money']:.1%}** of capital "
+            f"but contributes **{row['risk']:.1%}** of portfolio risk ({abs(gap):.1%} {direction} risk "
+            "than its capital share suggests).")
 
 
 def cell_text_color(v: float) -> str:
@@ -285,8 +302,37 @@ def notes(res):
         st.caption(f":material/info: {n}")
 
 
+def risk_contribution_table(res) -> pd.DataFrame:
+    """Format the engine's risk attribution fields for the app's table view."""
+    risk = res.metrics["risk_share"]
+    vols = res.metrics["asset_vols"]
+    # The main analysis already uses the same annualized covariance estimator and
+    # scenario dates. Reconstruct MCR/ARC from the existing risk shares and volatility.
+    # ARC_i = PCR_i * portfolio volatility; MCR_i = ARC_i / weight_i.
+    sigma_p = res.metrics["portfolio_vol"]
+    weights = np.asarray(res.weights, dtype=float)
+    risk = np.asarray(risk, dtype=float)
+    arc = risk * sigma_p
+    mcr = np.divide(arc, weights, out=np.zeros_like(arc), where=weights != 0)
+    return pd.DataFrame({
+        "Capital weight": weights,
+        "Asset volatility": vols,
+        "Marginal risk contribution": mcr,
+        "Absolute risk contribution": arc,
+        "Percentage risk contribution": risk,
+    }, index=res.tickers)
+
+
 def detail_table(res, label: str):
     with st.expander(f"Table view: {label}"):
+        st.caption("Risk contributions use annualized portfolio volatility. Percentage risk contributions sum to 100%.")
+        st.dataframe(risk_contribution_table(res).style.format({
+            "Capital weight": "{:.1%}",
+            "Asset volatility": "{:.1%}",
+            "Marginal risk contribution": "{:.2%}",
+            "Absolute risk contribution": "{:.2%}",
+            "Percentage risk contribution": "{:.1%}",
+        }), width="stretch")
         st.dataframe(pd.DataFrame({
             "Weight": res.weights, "Annual volatility": res.metrics["asset_vols"],
             "Share of risk": res.metrics["risk_share"],
@@ -393,6 +439,7 @@ def main():
         with left:
             st.subheader("Where your risk comes from")
             st.caption("A holding whose orange bar is longer than its blue bar adds more risk than its size suggests.")
+            st.info(risk_mismatch_insight(res))
             st.plotly_chart(risk_vs_money_chart(res), width="stretch", config=PLOTLY_CONFIG)
         with right:
             st.subheader("How your holdings move together")
@@ -455,6 +502,7 @@ def stress_section(normal, res, value: float, comparison):
     left, right = st.columns(2)
     with left:
         st.subheader("Where your risk came from")
+        st.info(risk_mismatch_insight(res))
         st.plotly_chart(risk_vs_money_chart(res), width="stretch", config=PLOTLY_CONFIG)
     with right:
         correlation_comparison(comparison)
@@ -473,6 +521,7 @@ If all holdings moved in lockstep the two would be equal (DR = 1).
 * **Zero-correlation baseline** = (Σwᵢσᵢ)² / Σ(wᵢσᵢ)². It keeps weights and volatilities fixed to isolate the effect of correlation.
 * **Risk removed** = 1 - 1/DR: the share of risk that offsetting moves cancel out.
 * **Share of risk** for each holding = its contribution to portfolio variance, wᵢ(Σw)ᵢ / σₚ². These add up to 100%.
+* **Risk contributions** use annualized covariance estimated from daily log returns. Marginal contribution is (Σw)ᵢ / σₚ; absolute contribution is wᵢ times marginal contribution; percentage contribution is absolute contribution / σₚ. Percentage contributions add to 100% (short positions are not supported).
 * **Bad year** = 1.645 × annual volatility × portfolio value, a 1-in-20 one-year loss under a normal approximation.
 
 **Windows.** Historical overview uses the last 3, 5 or 7 years (default 5), including sell-offs. Stress tests run from the S&P 500's

@@ -7,7 +7,7 @@ from threading import RLock
 
 _LOCK = RLock()
 # Dependencies first: imported functions/classes must all refer to the new modules.
-_MODULES = ("metrics", "scenarios", "data", "correlation", "analyze", "whatif")
+_MODULES = ("metrics", "scenarios", "data", "correlation", "analyze", "whatif", "risk_contributions")
 
 
 def load_engine():
