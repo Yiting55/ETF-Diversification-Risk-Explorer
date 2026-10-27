@@ -27,7 +27,9 @@ HELP = {
     "rf": "Annual rate as a decimal: 0.04 = 4%.",
     "custom": "Any US stock or ETF. Compared on the same terms as the default candidates.",
     "rank_normal": "Most added bets: biggest gain in equivalent bets. Most crisis-proof: ranked by the smaller "
-                   "improvement in worst fall across COVID 2020 and 2022, so only ETFs that helped in both rank high.",
+                   "improvement in worst fall across COVID 2020 and 2022, so only ETFs that helped in both rank high. "
+                   "Why both: in a back-test on 500 portfolios, TLT, the top pick before COVID, softened the 2022 "
+                   "fall in only 17% of them, while IEF and GLD helped in both crises almost every time.",
     "rank_stress": "Most added bets: biggest gain in equivalent bets in this period. "
                    "Shallowest fall: biggest reduction in the worst fall in this period.",
     "vol": "Annualised volatility of daily portfolio returns over this period.",

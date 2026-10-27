@@ -346,6 +346,7 @@ def portfolio_sidebar():
                                         format_func=lambda y: f"{y} years",
                                         help="Historical window of daily returns, including sell-offs. 5 years balances a stable "
                                              "estimate against reflecting today's market.") or DEFAULT_LOOKBACK
+    st.session_state["portfolio"] = {"holdings": holdings, "value": value}
     return holdings, value, lookback
 
 
