@@ -8,7 +8,7 @@ import pandas as pd
 
 from .analyze import DAYS_PER_HOLDING, WindowResult, analyze_window, clean_holdings
 from .data import PriceStore, load_universe, normalize_ticker
-from .metrics import diversification_metrics
+from .metrics import diversification_metrics, replay
 from .scenarios import DEFAULT_LOOKBACK, STRESS_SCENARIOS, Scenario, normal_window
 
 CANDIDATE_SETS: dict[str, dict[str, str]] = {
@@ -73,7 +73,16 @@ class WhatIf:
     holdings: pd.Series | None = None
 
 
-def _row(win_key, k, a, res: WindowResult, er: pd.Series | None) -> dict:
+@dataclass
+class _Measured:
+    tickers: list[str]
+    weights: np.ndarray
+    metrics: dict
+    replay: dict
+    low_confidence: bool
+
+
+def _row(win_key, k, a, res, er: pd.Series | None) -> dict:
     m = res.metrics
     exp = float(pd.Series(res.weights, index=res.tickers).mul(er.reindex(res.tickers)).sum()) if er is not None else np.nan
     return {"window": win_key, "candidate": k, "alpha": a,
@@ -124,17 +133,23 @@ def run_whatif(holdings: dict[str, float], lookback_years: int = DEFAULT_LOOKBAC
         er_s = er if align else None
         rows.append(_row(s.key, "(current)", 0.0, b, er_s))
         for k in candidates:
-            for a in alphas:
-                r = analyze_window(prices, new_weights(w, k, a), s, value, align_start=align, shrink=shrink)
-                if r is None or k in r.excluded:
-                    unavailable[f"{s.key}:{k}"] = (r.excluded.get(k) if r else "not enough data")
-                    break
-                if r.start != b.start or r.end != b.end:
-                    msg = (f"{k} is measured from {r.start:%d %b %Y} (its first price), "
-                           f"not {b.start:%d %b %Y}.")
-                    if msg not in notes[s.key]:
-                        notes[s.key].append(msg)
-                rows.append(_row(s.key, k, a, r, er_s))
+            r = analyze_window(prices, new_weights(w, k, alphas[0]), s, value, align_start=align, shrink=shrink)
+            if r is None or k in r.excluded:
+                unavailable[f"{s.key}:{k}"] = (r.excluded.get(k) if r else "not enough data")
+                continue
+            if r.start != b.start or r.end != b.end:
+                notes[s.key].append(f"{k} is measured from {r.start:%d %b %Y} (its first price), "
+                                    f"not {b.start:%d %b %Y}.")
+            rows.append(_row(s.key, k, alphas[0], r, er_s))
+            # The covariance and dates do not depend on the weight, so reuse them for the other weights.
+            vols = r.metrics["asset_vols"]
+            cov = r.corr.to_numpy() * np.outer(vols, vols)
+            px = prices.loc[r.start:r.end, r.tickers].dropna()
+            for a in alphas[1:]:
+                wa = new_weights(w, k, a).reindex(r.tickers)
+                wa = (wa / wa.sum()).to_numpy()
+                m = diversification_metrics(wa, cov)
+                rows.append(_row(s.key, k, a, _Measured(r.tickers, wa, m, replay(px, wa), r.low_confidence), er_s))
 
     if "normal" not in base:
         raise ValueError("Not enough overlapping price history to measure correlations.")
@@ -180,10 +195,32 @@ def ranking_table(wi: WhatIf, window: str = "normal", alpha: float = ALPHA_DEFAU
     tbl["best_alpha"] = best["alpha"]
     tbl["bets_at_best"] = best["bets"]
     y = "d_er" if window == "normal" else "d_max_dd"
-    tbl = mark_pareto(tbl, "d_bets", y).sort_values(rank_by, ascending=False)
+    crises = crisis_effects(wi, alpha).reindex(tbl.index)
+    keys = list(crises.columns.drop("all_crises"))
+    for key in keys:
+        tbl[f"dd_{key}"] = crises[key]
+    tbl["all_crises"] = crises["all_crises"].fillna(False).astype(bool)
+    tbl["worst_crisis"] = crises[keys].min(axis=1, skipna=False) if keys else np.nan
+    tbl = mark_pareto(tbl, "d_bets", y).sort_values(rank_by, ascending=False, na_position="last")
     tbl["held"] = [wi.held.get(k, "") for k in tbl.index]
     tbl.insert(0, "rank", range(1, len(tbl) + 1))
     return tbl
+
+
+def crisis_effects(wi: WhatIf, alpha: float) -> pd.DataFrame:
+    """Change in worst fall in each stress window at weight alpha (> 0 = shallower).
+    all_crises is True when the candidate made the fall shallower in every stress window."""
+    out = {}
+    for key in wi.base:
+        if key == "normal":
+            continue
+        g = wi.grid[wi.grid["window"] == key]
+        cur = g.loc[g["candidate"] == "(current)", "max_dd"].iloc[0]
+        at = g[(g["candidate"] != "(current)") & np.isclose(g["alpha"], alpha)].set_index("candidate")["max_dd"]
+        out[key] = at - cur
+    df = pd.DataFrame(out, index=list(wi.candidates))
+    df["all_crises"] = df.notna().all(axis=1) & (df > 0).all(axis=1) if len(out) else False
+    return df
 
 
 def mark_pareto(tbl: pd.DataFrame, x: str, y: str) -> pd.DataFrame:
@@ -233,6 +270,13 @@ def summary_sentence(wi: WhatIf, tbl: pd.DataFrame, window: str, alpha: float,
     move = f"Moving {alpha:.0%} of the portfolio into {k} ({name}){held}"
     bets = f"equivalent bets go from {cur['effective_bets']:.1f} to {row['bets']:.1f}"
 
+    if rank_by == "worst_crisis":
+        worst = row["worst_crisis"]
+        if not worst > 0:
+            return "At this weight, none of the candidate ETFs would have softened every past crisis tested."
+        return (f"{move} would have made the worst fall shallower in every crisis tested, by at least "
+                f"{worst * 100:.1f} pts; {bets}.")
+
     if rank_by == "d_max_dd":
         if row["d_max_dd"] <= 0.001:
             return "At this weight, none of the candidate ETFs would have made the worst fall in this period shallower."
@@ -246,6 +290,11 @@ def summary_sentence(wi: WhatIf, tbl: pd.DataFrame, window: str, alpha: float,
         tail = (f" and volatility changes by {row['d_vol'] * 100:+.1f} pts, "
                 + (f"at an estimated cost of {abs(cost):.2f} pts of expected return a year (CAPM)."
                    if cost < 0 else f"with expected return changing by {cost:+.2f} pts a year (CAPM)."))
+        missed = [STRESS_SCENARIOS[c[3:]].label for c in tbl.columns
+                  if c.startswith("dd_") and c != "dd_max_dd" and c[3:] in STRESS_SCENARIOS
+                  and not row[c] > 0]
+        if missed:
+            tail += f" It would not have softened the {' or the '.join(missed)}."
     else:
         dd = row["d_max_dd"] * 100
         tail = (f"; the worst fall in this period would have been {abs(dd):.1f} pts "
@@ -325,3 +374,100 @@ def purchase_sentence(pc: PurchaseCheck) -> str:
     else:
         alt = f". None of the alternatives adds more bets than {pc.ticker} at this amount."
     return head + alt
+
+
+def purchase_record(pc: PurchaseCheck, as_of: str | None = None) -> str:
+    """Plain-text record of a pre-trade check: inputs, impact and the alternatives considered."""
+    wi, n = pc.wi, pc.wi.base["normal"]
+    labels = {"normal": "Historical lookback", **{k: v.label for k, v in STRESS_SCENARIOS.items()}}
+    lines = [
+        "PRE-TRADE DIVERSIFICATION CHECK",
+        f"Generated: {as_of or f'{pd.Timestamp.now():%Y-%m-%d %H:%M}'}",
+        f"Price data to: {wi.prices.index.max():%Y-%m-%d}",
+        "",
+        "PORTFOLIO",
+        f"Value before purchase: ${pc.value:,.0f}",
+        *[f"  {t:<8}{w:>7.1%}" for t, w in wi.holdings.sort_values(ascending=False).items()],
+        "",
+        "PLANNED PURCHASE",
+        f"{pc.ticker} ({pc.name}): ${pc.amount:,.0f}, {pc.alpha:.1%} of the portfolio after purchase",
+        *([f"Note: {wi.held[pc.ticker]}"] if pc.ticker in wi.held else []),
+        "",
+        "IMPACT",
+        f"{'Period':<46}{'Equiv. bets':>14}{'Worst fall':>18}{'Worst fall (US$)':>22}",
+    ]
+    for key, r in pc.impact.iterrows():
+        if np.isnan(r["bets_after"]):
+            lines.append(f"{labels.get(key, key):<46}{'n/a':>14}")
+            continue
+        lines.append(f"{labels.get(key, key):<46}"
+                     f"{r['bets_before']:>6.2f} -> {r['bets_after']:<5.2f}"
+                     f"{r['dd_before']:>8.1%} -> {r['dd_after']:<7.1%}"
+                     f"{r['loss_before']:>10,.0f} -> {r['loss_after']:<9,.0f}")
+    tbl = ranking_table(wi, "normal", pc.alpha)
+    crisis_cols = [c for c in tbl.columns if c.startswith("dd_") and c[3:] in STRESS_SCENARIOS]
+    lines += ["", f"ALTERNATIVES CONSIDERED (same ${pc.amount:,.0f})",
+              f"{'Ticker':<8}{'Equiv. bets':>12}{'Change':>9}"
+              + "".join(f"{'Fall ' + c[3:].upper():>13}" for c in crisis_cols) + f"{'Both crises':>13}"]
+    for k, r in tbl.iterrows():
+        mark = " *" if k == pc.ticker else ""
+        lines.append(f"{k + mark:<8}{r['bets']:>12.2f}{r['d_bets']:>+9.2f}"
+                     + "".join(f"{_pts(r[c]):>13}" for c in crisis_cols)
+                     + f"{('yes' if r['all_crises'] else 'no'):>13}")
+    lines += [
+        "* planned purchase. Fall = change in worst fall (+ = shallower).",
+        "",
+        "METHOD",
+        f"Equivalent bets = DR^2, DR = sum(w_i * sigma_i) / sigma_p, daily returns "
+        f"{n.start:%Y-%m-%d} to {n.end:%Y-%m-%d}.",
+        "Stress windows (S&P 500 peak to trough): " + "; ".join(
+            f"{v.start:%Y-%m-%d} to {v.end:%Y-%m-%d}" for v in STRESS_SCENARIOS.values()) + ".",
+        f"Expected return (CAPM): rf {wi.rf:.2%}, market risk premium {wi.mrp:.1%}, beta vs VT.",
+        "Historical comparison only; not a recommendation.",
+    ]
+    return "\n".join(line.rstrip() for line in lines) + "\n"
+
+
+def _pts(x: float) -> str:
+    if pd.isna(x):
+        return "n/a"
+    v = round(x * 100, 1)
+    return "0.0 pts" if v == 0 else f"{v:+.1f} pts"
+
+
+def purchase_summary(pc: PurchaseCheck) -> dict:
+    """Structured result of a pre-trade check, shared by the API and the order-ticket demo."""
+    periods = {}
+    for key, r in pc.impact.iterrows():
+        def num(x):
+            return None if pd.isna(x) else round(float(x), 4)
+        periods[key] = {
+            "label": r["label"],
+            "bets_before": num(r["bets_before"]), "bets_after": num(r["bets_after"]),
+            "volatility_before": num(r["vol_before"]), "volatility_after": num(r["vol_after"]),
+            "worst_fall_before": num(r["dd_before"]), "worst_fall_after": num(r["dd_after"]),
+            "worst_fall_usd_before": num(r["loss_before"]), "worst_fall_usd_after": num(r["loss_after"]),
+        }
+    tbl = ranking_table(pc.wi, "normal", pc.alpha)
+    alt = tbl.drop(index=pc.ticker, errors="ignore")
+    robust = alt[alt["all_crises"]]
+    best = (robust if not robust.empty else alt).index[0] if not alt.empty else None
+    pick = tbl.loc[pc.ticker] if pc.ticker in tbl.index else None
+    return {
+        "ticker": pc.ticker,
+        "name": pc.name,
+        "amount": pc.amount,
+        "portfolio_value": pc.value,
+        "share_of_portfolio_after": round(pc.alpha, 4),
+        "already_held": pc.wi.held.get(pc.ticker, ""),
+        "change_in_bets": None if pick is None else round(float(pick["d_bets"]), 4),
+        "softened_all_crises": None if pick is None else bool(pick["all_crises"]),
+        "periods": periods,
+        "best_alternative": None if best is None else {
+            "ticker": best,
+            "name": pc.wi.candidates.get(best, best),
+            "bets_after": round(float(tbl.loc[best, "bets"]), 4),
+            "softened_all_crises": bool(tbl.loc[best, "all_crises"]),
+        },
+        "data_to": f"{pc.wi.prices.index.max():%Y-%m-%d}",
+    }

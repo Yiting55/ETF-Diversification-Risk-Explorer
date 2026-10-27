@@ -44,6 +44,29 @@ streamlit run app/streamlit_app.py
 Tickers outside the filtered list (e.g. funds younger than 7 years such as SGOV) can still be
 typed in; they are downloaded on first use and cached in `data/cache/`.
 
+The **order ticket** page (sidebar navigation) shows the pre-trade check as it would appear in a
+broker's order flow. It uses the holdings entered on the main page.
+
+### Pre-trade check API
+
+```bash
+uvicorn api.main:app --reload       # docs at http://127.0.0.1:8000/docs
+```
+
+`POST /v1/pretrade-check` takes current holdings, the ticker to buy, the amount and the portfolio
+value, and returns the effect on equivalent bets and worst fall in each period plus the best
+alternative for the same amount. `POST /v1/pretrade-check/record` returns the same check as a
+plain-text record.
+
+### Validation
+
+```bash
+python validation/validate.py       # about a minute; writes validation/results/
+```
+
+Out-of-sample checks using only data from the five years before each crisis: whether a higher
+score meant a smaller crisis fall, and whether the What-if top pick softened the fall.
+
 ## Tests
 
 ```bash
@@ -64,6 +87,8 @@ engine/                   calculation engine (no Streamlit dependency, reusable 
   scenarios.py            normal lookback and stress windows
   analyze.py              portfolio -> results, with date alignment and exclusion rules
 scripts/fetch_universe.py data pipeline
+api/main.py               pre-trade check API
+validation/validate.py    out-of-sample checks
 tests/                    pytest suite
 ```
 
