@@ -542,11 +542,11 @@ avoids making a short crash look more diversified than it was.
 **Source.** Choueifaty & Coignard (2008), [Toward Maximum Diversification](https://www.tobam.fr/wp-content/uploads/2014/12/TOBAM-JoPM-Maximum-Div-2008.pdf),
 defines DR. We use DR² as an equivalent-bets interpretation of the volatility reduction.
 
-**What if.** Each candidate is tested at 5-40% of the portfolio, with existing holdings scaled down pro-rata:
-w' = (1 − α)·w + α·e_k. Expected return uses CAPM, E(Rᵢ) = r_f + βᵢ × market risk premium, with β against VT over the
-historical lookback and r_f from the trailing 12-month return of BIL. The robustness check resamples that window in
-21-day blocks 200 times. Buying US$A with new money on a portfolio worth US$V gives the same mix as α = A / (V + A);
-dollar losses use the portfolio value after the purchase.
+**What if.** Buying US\$A of one ETF with new money on a portfolio worth US\$V gives
+w' = (1 − α)·w + α·e_k with α = A / (V + A); each ETF is tested at that weight, and the chart also shows 5-40%.
+Dollar losses use the portfolio value after the purchase. Expected return uses CAPM, E(Rᵢ) = r_f + βᵢ × market risk
+premium, with β against VT over the historical lookback and r_f from the trailing 12-month return of BIL. The
+robustness check resamples that window in 21-day blocks 200 times.
 """
 
 main()
