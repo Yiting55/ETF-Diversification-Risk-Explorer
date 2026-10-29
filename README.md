@@ -44,6 +44,7 @@ streamlit run app/streamlit_app.py
 Tickers outside the filtered list (e.g. funds younger than 7 years such as SGOV) can still be
 typed in; they are downloaded on first use and cached in `data/cache/`.
 
+The **Monte Carlo outlook** is available as a tab on the main page and uses the current portfolio.
 The **order ticket** page (sidebar navigation) shows the pre-trade check as it would appear in a
 broker's order flow. It uses the holdings entered on the main page.
 

@@ -13,9 +13,6 @@ sys.path.insert(0, str(ROOT))
 from engine.data import PriceStore, normalize_ticker  # noqa: E402
 from engine.monte_carlo import MonteCarloResult, simulate_portfolio  # noqa: E402
 
-st.set_page_config(page_title="Monte Carlo outlook", page_icon=":material/query_stats:", layout="wide")
-
-
 @st.cache_resource
 def price_store() -> PriceStore:
     return PriceStore()
@@ -139,51 +136,73 @@ def render_results(result: MonteCarloResult):
                   help="Five percent of simulations had an even deeper maximum drawdown.")
 
 
-def main():
-    st.title("Monte Carlo outlook")
-    st.caption("Explore a distribution of possible portfolio paths by resampling historical returns.")
+SIMULATION_PRESETS = {
+    "Balanced (recommended)": {"lookback_years": 5, "horizon_years": 1, "n_simulations": 2_000, "block_days": 21},
+    "Quick preview": {"lookback_years": 3, "horizon_years": 1, "n_simulations": 500, "block_days": 5},
+    "Long-term range": {"lookback_years": 7, "horizon_years": 3, "n_simulations": 5_000, "block_days": 21},
+}
 
-    with st.form("monte_carlo_settings"):
-        st.subheader("Portfolio and simulation settings")
-        ticker_text = st.text_input("Holdings tickers, comma-separated", value="VOO, AGG")
-        weight_text = st.text_input("Capital weights in the same order (%)", value="60, 40")
-        left, middle, right = st.columns(3)
-        starting_value = left.number_input("Starting portfolio value (US$)", min_value=100.0,
-                                           value=10_000.0, step=1_000.0)
-        lookback_years = middle.selectbox("Historical sample", [1, 3, 5, 7], index=2,
-                                          format_func=lambda n: f"Last {n} years")
-        horizon_years = right.selectbox("Simulation horizon", [1, 2, 3], index=0,
-                                        format_func=lambda n: f"{n} year" + ("s" if n > 1 else ""))
-        left, middle, right = st.columns(3)
-        n_simulations = left.selectbox("Number of simulations", [500, 1_000, 2_000, 5_000], index=2)
-        block_days = middle.selectbox("Return block length", [1, 5, 21], index=2,
-                                      format_func=lambda n: {1: "1 day", 5: "1 week", 21: "1 month"}[n])
-        seed = right.number_input("Random seed", min_value=0, max_value=2_147_483_647,
-                                  value=42, step=1)
-        submitted = st.form_submit_button("Run simulation", type="primary")
 
+def render_monte_carlo(portfolio: dict[str, float], portfolio_value: float):
+    """Render an approachable Monte Carlo explorer using the main page's live portfolio."""
+    st.subheader("Monte Carlo outlook")
+    st.caption("Explore a range of possible portfolio paths by resampling historical returns.")
+    holdings = {normalize_ticker(t): float(w) for t, w in portfolio.items() if float(w) > 0}
+    if not holdings:
+        st.info("Add at least one holding with a positive weight in the sidebar to simulate outcomes.")
+        return
+    total = sum(holdings.values())
+    normalized = {t: w / total for t, w in holdings.items()}
+    mix = " · ".join(f"{t} {w:.0%}" for t, w in normalized.items())
+    st.caption(f"Using your current portfolio · {mix} · starting value ${portfolio_value:,.0f}")
+
+    col1, col2 = st.columns([2, 3])
+    preset = col1.selectbox("Simulation setup", [*SIMULATION_PRESETS, "Customize"], index=0,
+                            key="mc_preset", help="Choose a ready-made setup or customize each value.")
+    settings = SIMULATION_PRESETS.get(preset, SIMULATION_PRESETS["Balanced (recommended)"])
+    if preset == "Customize":
+        with st.container(border=True):
+            st.markdown("**Customize simulation**")
+            a, b = st.columns(2)
+            lookback_years = a.selectbox("Historical sample", [1, 3, 5, 7], index=2,
+                                         format_func=lambda n: f"Last {n} years", key="mc_lookback_custom")
+            horizon_years = b.selectbox("Outlook", [1, 2, 3], index=0,
+                                        format_func=lambda n: f"{n} year" + ("s" if n > 1 else ""), key="mc_horizon_custom")
+            a, b, c = st.columns(3)
+            n_simulations = a.selectbox("Paths", [500, 1_000, 2_000, 5_000], index=2, key="mc_paths_custom",
+                                        help="More paths smooth the percentiles but take longer to calculate.")
+            block_days = b.selectbox("Return block", [1, 5, 21], index=2,
+                                     format_func=lambda n: {1: "1 day", 5: "1 week", 21: "1 month"}[n],
+                                     key="mc_block_custom", help="Longer blocks retain more of the observed return clustering.")
+            seed = c.number_input("Random seed", min_value=0, max_value=2_147_483_647,
+                                  value=42, step=1, key="mc_seed_custom")
+        settings = {"lookback_years": lookback_years, "horizon_years": horizon_years,
+                    "n_simulations": n_simulations, "block_days": block_days}
+        settings["seed"] = seed
+    else:
+        settings["seed"] = 42
+        col2.caption({
+            "Balanced (recommended)": "5 years of history · 1 year outlook · 2,000 paths · 1 month return blocks",
+            "Quick preview": "3 years of history · 1 year outlook · 500 paths · 1 week return blocks",
+            "Long-term range": "7 years of history · 3 year outlook · 5,000 paths · 1 month return blocks",
+        }[preset])
+    submitted = st.button("Run simulation", type="primary", key="mc_run")
     if submitted:
-        try:
-            parsed = parse_portfolio(ticker_text, weight_text)
-            st.session_state["mc_config"] = {
-                "weights": parsed, "starting_value": float(starting_value),
-                "lookback_years": int(lookback_years), "horizon_years": int(horizon_years),
-                "n_simulations": int(n_simulations), "block_days": int(block_days),
-                "seed": int(seed),
-            }
-            st.session_state.pop("mc_error", None)
-        except ValueError as exc:
-            st.session_state.pop("mc_config", None)
-            st.session_state["mc_error"] = str(exc)
-
-    if st.session_state.get("mc_error"):
-        st.error(st.session_state["mc_error"])
+        st.session_state["mc_config"] = {"weights": holdings, "starting_value": float(portfolio_value),
+                                         **{k: int(v) for k, v in settings.items()}}
+        st.session_state.pop("mc_error", None)
 
     config = st.session_state.get("mc_config")
     if not config:
-        st.info("Enter a portfolio and select **Run simulation** to generate the outcome range.")
+        st.info("Choose a setup, then run the simulation to see the outcome range.")
         return
 
+    # Refresh automatically when the user changes holdings or portfolio value in the sidebar.
+    current_signature = (tuple(sorted(holdings.items())), float(portfolio_value))
+    if config.get("portfolio_signature") != current_signature:
+        config = {**config, "weights": holdings, "starting_value": float(portfolio_value),
+                  "portfolio_signature": current_signature}
+        st.session_state["mc_config"] = config
     holdings = config["weights"]
     prices, unknown = load_prices(tuple(holdings))
     if unknown:
@@ -221,4 +240,17 @@ def main():
         )
 
 
-main()
+def main():
+    """Standalone multipage entry point; the primary app embeds this renderer in a tab."""
+    st.title("Monte Carlo outlook")
+    saved = st.session_state.get("portfolio", {})
+    holdings = saved.get("holdings", {})
+    value = saved.get("value", 10_000.0)
+    if not holdings:
+        st.info("Open Diversification X-Ray and add holdings in the sidebar, or create a portfolio there first.")
+        return
+    render_monte_carlo(holdings, value)
+
+
+if __name__ == "__main__":
+    main()
