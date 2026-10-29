@@ -21,6 +21,7 @@ from engine.correlation import average_pairwise, rolling_correlation  # noqa: E4
 from engine.scenarios import DEFAULT_LOOKBACK, LOOKBACK_CHOICES  # noqa: E402
 from engine.risk_contributions import calculate_risk_contributions  # noqa: E402
 from app.whatif_tab import render_whatif  # noqa: E402
+from app.monte_carlo import render_monte_carlo  # noqa: E402
 
 st.set_page_config(page_title="Diversification X-Ray", page_icon=":material/donut_small:", layout="wide")
 
@@ -406,7 +407,11 @@ def main():
         st.info("Add at least one holding with a positive weight in the sidebar.", icon=":material/arrow_back:")
         return
 
-    tab_normal, tab_stress, tab_whatif = st.tabs(["Historical overview", "Stress test", "What if: add one ETF"])
+    tab_normal, tab_stress, tab_whatif, tab_mc = st.tabs(
+        ["Historical overview", "Stress test", "What if: add one ETF", "Monte Carlo outlook"])
+
+    with tab_mc:
+        render_monte_carlo(holdings, value)
 
     with tab_stress:
         options = {**{k: s.label for k, s in STRESS_SCENARIOS.items()}, "custom": "Custom period"}
