@@ -176,14 +176,13 @@ def test_purchase_alpha_validation():
 
 
 def test_check_purchase_impact_and_dollars():
-    from engine.whatif import check_purchase, purchase_sentence
+    from engine.whatif import check_purchase
     pc = check_purchase({"VOO": 60, "QQQ": 40}, "tlt", 2_500, value=10_000, store=FakeStore())
     assert pc.ticker == "TLT" and pc.alpha == pytest.approx(0.2)
     assert set(pc.impact.index) == {"normal", "covid", "2022"}
     r = pc.impact.loc["normal"]
     assert r["bets_after"] > r["bets_before"]
     assert r["loss_after"] == pytest.approx(r["dd_after"] * 12_500)
-    assert "TLT" in purchase_sentence(pc)
 
 
 def test_check_purchase_more_equity_vs_hedge():
@@ -191,6 +190,17 @@ def test_check_purchase_more_equity_vs_hedge():
     eq = check_purchase({"VOO": 60, "QQQ": 40}, "VT", 2_500, store=FakeStore()).impact.loc["normal"]
     hedge = check_purchase({"VOO": 60, "QQQ": 40}, "IEF", 2_500, store=FakeStore()).impact.loc["normal"]
     assert hedge["bets_after"] - hedge["bets_before"] > eq["bets_after"] - eq["bets_before"]
+
+
+def test_purchase_from_a_full_run_matches_check_purchase():
+    from engine.whatif import ALPHA_GRID, CANDIDATE_SETS, check_purchase, purchase_from, summary_sentence
+    h = {"VOO": 60, "QQQ": 40}
+    pc = check_purchase(h, "QQQ", 2_000, value=10_000, store=FakeStore())
+    wi = run_whatif(h, candidates={**CANDIDATE_SETS["US"], "QQQ": "QQQ"}, alphas=(pc.alpha, *ALPHA_GRID),
+                    store=FakeStore())
+    pd.testing.assert_frame_equal(purchase_from(wi, "QQQ", 2_000, 10_000).impact, pc.impact)
+    tbl = ranking_table(wi, "normal", pc.alpha)
+    assert summary_sentence(wi, tbl, "normal", pc.alpha, amount=2_000).startswith("Putting $2,000 into")
 
 
 def test_check_purchase_unknown_ticker():

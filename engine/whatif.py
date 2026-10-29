@@ -65,7 +65,6 @@ class WhatIf:
     candidates: dict[str, str]
     rf: float
     mrp: float
-    expected_returns: pd.Series
     unavailable: dict[str, str] = field(default_factory=dict)
     held: dict[str, str] = field(default_factory=dict)
     notes: dict[str, list[str]] = field(default_factory=dict)
@@ -87,8 +86,7 @@ def _row(win_key, k, a, res, er: pd.Series | None) -> dict:
     exp = float(pd.Series(res.weights, index=res.tickers).mul(er.reindex(res.tickers)).sum()) if er is not None else np.nan
     return {"window": win_key, "candidate": k, "alpha": a,
             "bets": m["effective_bets"], "vol": m["portfolio_vol"], "er": exp,
-            "max_dd": res.replay["max_drawdown"], "total_return": res.replay["total_return"],
-            "hedged": m["hedged"], "low_confidence": res.low_confidence}
+            "max_dd": res.replay["max_drawdown"], "low_confidence": res.low_confidence}
 
 
 def run_whatif(holdings: dict[str, float], lookback_years: int = DEFAULT_LOOKBACK,
@@ -154,7 +152,7 @@ def run_whatif(holdings: dict[str, float], lookback_years: int = DEFAULT_LOOKBAC
     if "normal" not in base:
         raise ValueError("Not enough overlapping price history to measure correlations.")
     return WhatIf(grid=pd.DataFrame(rows), base=base, candidates=candidates, rf=rf, mrp=mrp,
-                  expected_returns=er, unavailable=unavailable, prices=prices, holdings=w,
+                  unavailable=unavailable, prices=prices, holdings=w,
                   held=held_status(w, candidates), notes=notes)
 
 
@@ -189,11 +187,7 @@ def ranking_table(wi: WhatIf, window: str = "normal", alpha: float = ALPHA_DEFAU
         "d_vol": at["vol"] - cur["vol"],
         "d_er": at["er"] - cur["er"],
         "d_max_dd": at["max_dd"] - cur["max_dd"],
-        "d_total_return": at["total_return"] - cur["total_return"],
     })
-    best = g.loc[g.groupby("candidate")["bets"].idxmax()].set_index("candidate")
-    tbl["best_alpha"] = best["alpha"]
-    tbl["bets_at_best"] = best["bets"]
     y = "d_er" if window == "normal" else "d_max_dd"
     crises = crisis_effects(wi, alpha).reindex(tbl.index)
     keys = list(crises.columns.drop("all_crises"))
@@ -260,38 +254,41 @@ def ranking_stability(wi: WhatIf, alpha: float = ALPHA_DEFAULT, n_boot: int = 20
 
 
 def summary_sentence(wi: WhatIf, tbl: pd.DataFrame, window: str, alpha: float,
-                     rank_by: str = "d_bets") -> str:
+                     rank_by: str = "d_bets", amount: float | None = None) -> str:
+    """One-line reading of the top-ranked candidate. With `amount`, phrased as a purchase of new money."""
     if tbl.empty:
         return "No candidate could be tested in this period."
     k, row = tbl.index[0], tbl.iloc[0]
     cur = wi.base[window].metrics
     name = wi.candidates.get(k, k)
     held = f" (you {wi.held[k].replace('already held', 'already hold it')})" if k in wi.held else ""
-    move = f"Moving {alpha:.0%} of the portfolio into {k} ({name}){held}"
-    bets = f"equivalent bets go from {cur['effective_bets']:.1f} to {row['bets']:.1f}"
+    move = (f"Putting ${amount:,.0f} into {k} ({name}){held}" if amount
+            else f"Moving {alpha:.0%} of the portfolio into {k} ({name}){held}")
+    size = "this amount" if amount else "this weight"
+    bets = f"equivalent bets go from {cur['effective_bets']:.2f} to {row['bets']:.2f}"
 
     if rank_by == "worst_crisis":
         worst = row["worst_crisis"]
         if not worst > 0:
-            return "At this weight, none of the candidate ETFs would have softened every past crisis tested."
+            return f"At {size}, none of the candidate ETFs would have softened every past crisis tested."
         return (f"{move} would have made the worst fall shallower in every crisis tested, by at least "
                 f"{worst * 100:.1f} pts; {bets}.")
 
     if rank_by == "d_max_dd":
         if row["d_max_dd"] <= 0.001:
-            return "At this weight, none of the candidate ETFs would have made the worst fall in this period shallower."
+            return f"At {size}, none of the candidate ETFs would have made the worst fall in this period shallower."
         return (f"{move} would have made the worst fall in this period {row['d_max_dd'] * 100:.1f} pts "
                 f"shallower; {bets}.")
 
     if row["d_bets"] <= 0.01:
-        return "At this weight, none of the candidate ETFs would meaningfully add equivalent bets."
+        return f"At {size}, none of the candidate ETFs would meaningfully add equivalent bets."
     if window == "normal":
         cost = row["d_er"] * 100
         tail = (f" and volatility changes by {row['d_vol'] * 100:+.1f} pts, "
                 + (f"at an estimated cost of {abs(cost):.2f} pts of expected return a year (CAPM)."
                    if cost < 0 else f"with expected return changing by {cost:+.2f} pts a year (CAPM)."))
         missed = [STRESS_SCENARIOS[c[3:]].label for c in tbl.columns
-                  if c.startswith("dd_") and c != "dd_max_dd" and c[3:] in STRESS_SCENARIOS
+                  if c.startswith("dd_") and c[3:] in STRESS_SCENARIOS
                   and not row[c] > 0]
         if missed:
             tail += f" It would not have softened the {' or the '.join(missed)}."
@@ -342,7 +339,13 @@ def check_purchase(holdings: dict[str, float], ticker: str, amount: float, value
                     alphas=(alpha,), rf=rf, mrp=mrp, store=store, value=value)
     if ticker not in wi.candidates:
         raise ValueError(f"No price data found for {ticker}.")
+    return purchase_from(wi, ticker, amount, value)
 
+
+def purchase_from(wi: WhatIf, ticker: str, amount: float, value: float) -> PurchaseCheck:
+    """Before/after impact of buying `amount` of `ticker`, read from a What-if run that includes
+    that candidate at weight amount / (value + amount)."""
+    alpha = purchase_alpha(value, amount)
     rows = []
     for key, b in wi.base.items():
         g = wi.grid[(wi.grid.window == key)]
@@ -358,22 +361,8 @@ def check_purchase(holdings: dict[str, float], ticker: str, amount: float, value
             "loss_before": cur["max_dd"] * value,
             "loss_after": a["max_dd"] * (value + amount) if a is not None else np.nan,
         })
-    return PurchaseCheck(ticker=ticker, name=name, amount=amount, value=value, alpha=alpha,
-                         impact=pd.DataFrame(rows).set_index("window"), wi=wi)
-
-
-def purchase_sentence(pc: PurchaseCheck) -> str:
-    n = pc.impact.loc["normal"]
-    head = (f"Buying ${pc.amount:,.0f} of {pc.ticker} ({pc.alpha:.0%} of the new total) would take equivalent "
-            f"bets from {n['bets_before']:.2f} to {n['bets_after']:.2f}")
-    tbl = ranking_table(pc.wi, "normal", pc.alpha)
-    best = tbl.index[0]
-    if best != pc.ticker and tbl.loc[best, "d_bets"] > tbl.loc[pc.ticker, "d_bets"] + 0.01:
-        alt = (f". Putting the same amount into {best} ({pc.wi.candidates.get(best, best)}) "
-               f"would give {tbl.loc[best, 'bets']:.2f}.")
-    else:
-        alt = f". None of the alternatives adds more bets than {pc.ticker} at this amount."
-    return head + alt
+    return PurchaseCheck(ticker=ticker, name=wi.candidates.get(ticker, ticker), amount=amount, value=value,
+                         alpha=alpha, impact=pd.DataFrame(rows).set_index("window"), wi=wi)
 
 
 def purchase_record(pc: PurchaseCheck, as_of: str | None = None) -> str:
