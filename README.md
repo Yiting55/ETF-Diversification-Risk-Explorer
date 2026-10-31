@@ -55,8 +55,8 @@ uvicorn api.main:app --reload       # docs at http://127.0.0.1:8000/docs
 ```
 
 `POST /v1/pretrade-check` takes current holdings, the ticker to buy, the amount and the portfolio
-value, and returns the effect on equivalent bets and worst fall in each period plus the best
-alternative for the same amount. `POST /v1/pretrade-check/record` returns the same check as a
+value, and returns a verdict (diversifies, concentrates or little change), the effect on equivalent
+bets and worst fall in each period, and the best alternative for the same amount. `POST /v1/pretrade-check/record` returns the same check as a
 plain-text record.
 
 ### Validation

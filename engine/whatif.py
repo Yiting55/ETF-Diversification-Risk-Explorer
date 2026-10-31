@@ -28,6 +28,7 @@ DEFAULT_REGION = "US"
 MRP_DEFAULT = 0.05
 ALPHA_GRID = tuple(round(0.05 * i, 2) for i in range(1, 9))
 ALPHA_DEFAULT = 0.10
+VERDICT_THRESHOLD = 0.01  # change in equivalent bets treated as "little change"
 TRADING_DAYS = 252
 
 
@@ -424,6 +425,12 @@ def _pts(x: float) -> str:
     return "0.0 pts" if v == 0 else f"{v:+.1f} pts"
 
 
+def diversification_verdict(change_in_bets: float | None) -> str:
+    if change_in_bets is None or abs(change_in_bets) <= VERDICT_THRESHOLD:
+        return "little_change"
+    return "diversifies" if change_in_bets > 0 else "concentrates"
+
+
 def purchase_summary(pc: PurchaseCheck) -> dict:
     """Structured result of a pre-trade check, shared by the API and the order-ticket demo."""
     periods = {}
@@ -442,6 +449,11 @@ def purchase_summary(pc: PurchaseCheck) -> dict:
     robust = alt[alt["all_crises"]]
     best = (robust if not robust.empty else alt).index[0] if not alt.empty else None
     pick = tbl.loc[pc.ticker] if pc.ticker in tbl.index else None
+    change = None if pick is None else round(float(pick["d_bets"]), 4)
+    softened = None if pick is None else bool(pick["all_crises"])
+    better = best is not None and pick is not None and (
+        tbl.loc[best, "bets"] > pick["bets"] + VERDICT_THRESHOLD
+        or (bool(tbl.loc[best, "all_crises"]) and not softened))
     return {
         "ticker": pc.ticker,
         "name": pc.name,
@@ -449,14 +461,16 @@ def purchase_summary(pc: PurchaseCheck) -> dict:
         "portfolio_value": pc.value,
         "share_of_portfolio_after": round(pc.alpha, 4),
         "already_held": pc.wi.held.get(pc.ticker, ""),
-        "change_in_bets": None if pick is None else round(float(pick["d_bets"]), 4),
-        "softened_all_crises": None if pick is None else bool(pick["all_crises"]),
+        "change_in_bets": change,
+        "verdict": diversification_verdict(change),
+        "softened_all_crises": softened,
         "periods": periods,
         "best_alternative": None if best is None else {
             "ticker": best,
             "name": pc.wi.candidates.get(best, best),
             "bets_after": round(float(tbl.loc[best, "bets"]), 4),
             "softened_all_crises": bool(tbl.loc[best, "all_crises"]),
+            "is_better": bool(better),
         },
         "data_to": f"{pc.wi.prices.index.max():%Y-%m-%d}",
     }

@@ -13,6 +13,7 @@ PALETTE = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9
 WINDOWS = {"normal": "Historical overview", "covid": "COVID 2020", "2022": "2022 sell-off"}
 SHORT = {"covid": "COVID", "2022": "2022"}
 MAX_PICKS = 3
+RF_INPUT_DEFAULT = 0.04
 
 HELP = {
     "mrp": "Extra annual return the stock market is assumed to earn over the risk-free rate. "
@@ -25,8 +26,6 @@ HELP = {
             "fall in only 17% of them, while IEF and GLD helped in both crises almost every time.",
     "now": "Your portfolio today over the lookback in the sidebar. Volatility is annualised; expected return is a "
            "CAPM estimate (risk-free rate + beta × market risk premium, beta against VT), not a forecast.",
-    "table": "Each row puts the same amount into one ETF and measures the portfolio again. "
-             "Green means better than today, red means worse. Hover over a column name for its definition.",
     "curve": "Each line is one ETF. Moving right puts more of the portfolio into it; higher means more "
              "diversified. The dotted line is your portfolio today and the shaded line is your amount. Where a "
              "line flattens, adding more brings little extra diversification.",
@@ -44,7 +43,9 @@ HELP = {
                "it would have softened both COVID 2020 and the 2022 sell-off. The numbers are in the table below.",
     "alternative": "The default diversifier that improves the portfolio most for the same amount, preferring ones "
                    "that softened both past crises.",
-    "compare": "Your picks next to the default diversifiers, all with the same amount.",
+    "compare": "Your picks next to the default diversifiers. Each row puts the same amount into one ETF and "
+               "measures the portfolio again. Green means better than today, red means worse. Hover over a column "
+               "name for its definition.",
     "robust_btn": "Resamples the daily history in 21-day blocks, 200 times, and ranks the candidates again each "
                   "time. A long bar means that ETF stays the top pick across many versions of history.",
     "before_after": "Your portfolio before and after the purchase, in each period. For the historical overview, "
@@ -78,6 +79,9 @@ GOOD, BAD = "#0ca30c", "#d03b3b"
 # +1: a positive change is better; -1: a negative change is better
 DIRECTION = {"Δ bets": 1, "Δ return": 1, "Δ fall COVID": 1, "Δ fall 2022": 1, "Δ vol": -1}
 SERIOUS = "#ec835a"
+VERDICTS = {"concentrates": ("Concentrates your portfolio", "⚠", SERIOUS),
+            "diversifies": ("Adds diversification", "✓", GOOD),
+            "little_change": ("Little change in diversification", "•", MUTED)}
 
 
 def _tone(value, direction: int) -> str:
@@ -173,7 +177,7 @@ def _assumptions():
         st.slider("Market risk premium", 0.02, 0.08, wf.MRP_DEFAULT, 0.005, format="%.3f", key="wi_mrp",
                   help=HELP["mrp"])
         if st.toggle("Set risk-free rate myself", key="wi_own_rf", help=HELP["own_rf"]):
-            st.number_input("Risk-free rate", value=0.04, step=0.0025, format="%.4f", key="wi_rf", help=HELP["rf"])
+            st.number_input("Risk-free rate", value=RF_INPUT_DEFAULT, step=0.0025, format="%.4f", key="wi_rf", help=HELP["rf"])
 
 
 def _ticker_picker(label: str, key: str, help=None):
@@ -196,9 +200,9 @@ def _add_quick_pick():
 
 
 def _rf_setting() -> tuple[float, float | None]:
-    """CAPM inputs set in the assumptions popover at the bottom of the tab."""
+    """CAPM inputs set in the assumptions popover next to Rank by."""
     mrp = st.session_state.get("wi_mrp", wf.MRP_DEFAULT)
-    rf = st.session_state.get("wi_rf", 0.04) if st.session_state.get("wi_own_rf") else None
+    rf = st.session_state.get("wi_rf", RF_INPUT_DEFAULT) if st.session_state.get("wi_own_rf") else None
     return mrp, rf
 
 
@@ -233,38 +237,35 @@ def render_whatif(holdings: dict, lookback: int, store, value: float = 10_000, e
     _render_comparison(wi, picks, key, lookback, store, engine_revision, amount, alpha, rf)
 
 
-def _badge(text: str, icon: str, color: str):
+def badge(text: str, icon: str, color: str):
     st.markdown(f"<span style='display:inline-block;padding:2px 10px;margin:2px 6px 2px 0;border-radius:12px;"
                 f"border:1px solid {color};color:{color};font-weight:600'>{icon} {text}</span>",
                 unsafe_allow_html=True)
 
 
+def verdict_badge(verdict: str):
+    badge(*VERDICTS[verdict])
+
+
 def _render_picks(wi, picks: list, amount: float, value: float):
-    st.subheader("Your picks", help=HELP["verdict"])
+    st.subheader("Your picks", help=HELP["verdict"], anchor=False)
     cards = st.columns(len(picks))
     for col, k in zip(cards, picks):
         s = wf.purchase_summary(wf.purchase_from(wi, k, amount, value))
-        d = s["change_in_bets"] or 0.0
         with col.container(border=True):
             st.markdown(f"**{k}** · {s['name']}")
             if s["already_held"]:
                 st.caption(f"You {s['already_held'].replace('already held', 'already hold it')}.")
-            if d < -0.01:
-                _badge("Concentrates your portfolio", "⚠", SERIOUS)
-            elif d > 0.01:
-                _badge("Adds diversification", "✓", GOOD)
-            else:
-                _badge("Little change in diversification", "•", MUTED)
+            verdict_badge(s["verdict"])
             deeper = [WINDOWS[w] for w, p in s["periods"].items()
                       if w != "normal" and p["worst_fall_after"] is not None
                       and p["worst_fall_after"] < p["worst_fall_before"]]
             if s["softened_all_crises"]:
-                _badge("Softened both past crises", "✓", GOOD)
+                badge("Softened both past crises", "✓", GOOD)
             elif deeper:
-                _badge(f"Deeper fall in {' and '.join(deeper)}", "⚠", SERIOUS)
+                badge(f"Deeper fall in {' and '.join(deeper)}", "⚠", SERIOUS)
             alt = s["best_alternative"]
-            if alt and (alt["bets_after"] > s["periods"]["normal"]["bets_after"] + 0.01
-                        or (alt["softened_all_crises"] and not s["softened_all_crises"])):
+            if alt and alt["is_better"]:
                 st.markdown(f"Better for the same {_money(amount)}: **{alt['ticker']}** ({alt['name']})"
                             + (", which softened both crises." if alt["softened_all_crises"] else "."),
                             help=HELP["alternative"])
@@ -295,10 +296,14 @@ def _render_picks(wi, picks: list, amount: float, value: float):
 
 def _render_comparison(wi, picks: list, key: tuple, lookback: int, store, rev: str, amount: float,
                        alpha: float, rf: float | None):
-    st.subheader(f"Compared with other diversifiers, {_money(amount)} each", help=HELP["compare"])
+    st.subheader(f"Compared with other diversifiers, {_money(amount)} each", help=HELP["compare"], anchor=False)
     labels = {"d_bets": "Most added bets", "worst_crisis": "Most crisis-proof"}
-    rank_by = st.segmented_control("Rank by", labels, format_func=labels.get, default="d_bets",
-                                   key="wi_rank_by", help=HELP["rank"]) or "d_bets"
+    c1, c2 = st.columns([3, 1], vertical_alignment="bottom")
+    with c1:
+        rank_by = st.segmented_control("Rank by", labels, format_func=labels.get, default="d_bets",
+                                       key="wi_rank_by", help=HELP["rank"]) or "d_bets"
+    with c2:
+        _assumptions()
 
     cands = list(wi.candidates)
     style = _styles(cands)
@@ -337,12 +342,11 @@ def _render_comparison(wi, picks: list, key: tuple, lookback: int, store, rev: s
     for col in [col for col in tbl.columns if col.startswith("dd_") and col[3:] in SHORT]:
         cols[f"Δ fall {SHORT[col[3:]]}"] = tbl[col].map(lambda x: "n/a" if pd.isna(x) else _pts(x))
     cols["Both crises"] = tbl["all_crises"].map({True: "Yes", False: ""})
-    st.markdown(f"**Each ETF with {_money(amount)}**", help=HELP["table"])
     _table(pd.DataFrame(cols))
 
     left, right = st.columns(2)
     with left:
-        st.subheader("How much to add?", help=HELP["curve"])
+        st.subheader("How much to add?", help=HELP["curve"], anchor=False)
         g = wi.grid[wi.grid.window == "normal"]
         fig, ends = go.Figure(), {}
         for k in cands:
@@ -376,7 +380,7 @@ def _render_comparison(wi, picks: list, key: tuple, lookback: int, store, rev: s
         y_col, y_title = (("worst_crisis", "Change in fall, worse crisis (pts, + = shallower)") if crisis
                           else ("d_er", "Change in expected return (pts a year)"))
         st.subheader("Did it protect in both crises?" if crisis else "What does it cost?",
-                     help=HELP["protect" if crisis else "cost"])
+                     help=HELP["protect" if crisis else "cost"], anchor=False)
         fig2 = go.Figure()
         for k, r in pts.iterrows():
             fig2.add_scatter(
@@ -391,18 +395,14 @@ def _render_comparison(wi, picks: list, key: tuple, lookback: int, store, rev: s
                 yaxis=dict(title=y_title))
         st.plotly_chart(fig2, width="stretch", config=PLOTLY_CONFIG)
 
-    s1, s2 = st.columns([1, 3])
-    with s1:
-        _assumptions()
-    with s2:
-        with st.expander("Is the ranking robust?", icon=":material/insights:"):
-            if st.button("Run robustness check", key="wi_boot", help=HELP["robust_btn"]):
-                stab = _stability(key, lookback, wi.mrp, rf, tuple(wi.candidates.items()), alpha, store, rev)
-                fig3 = go.Figure(go.Bar(x=stab.values, y=stab.index, orientation="h",
-                                        marker=dict(color=[color.get(k, MUTED) for k in stab.index]),
-                                        text=[f"{v:.0%}" for v in stab.values], textposition="outside",
-                                        hovertemplate="%{y}: ranked first in %{x:.0%} of resamples<extra></extra>"))
-                _layout(fig3, 280, xaxis=dict(tickformat=".0%", range=[0, 1.12],
-                                              title="Share of resamples ranked first"),
-                        yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig3, width="stretch", config=PLOTLY_CONFIG)
+    with st.expander("Is the ranking robust?", icon=":material/insights:"):
+        if st.button("Run robustness check", key="wi_boot", help=HELP["robust_btn"]):
+            stab = _stability(key, lookback, wi.mrp, rf, tuple(wi.candidates.items()), alpha, store, rev)
+            fig3 = go.Figure(go.Bar(x=stab.values, y=stab.index, orientation="h",
+                                    marker=dict(color=[color.get(k, MUTED) for k in stab.index]),
+                                    text=[f"{v:.0%}" for v in stab.values], textposition="outside",
+                                    hovertemplate="%{y}: ranked first in %{x:.0%} of resamples<extra></extra>"))
+            _layout(fig3, 280, xaxis=dict(tickformat=".0%", range=[0, 1.12],
+                                          title="Share of resamples ranked first"),
+                    yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig3, width="stretch", config=PLOTLY_CONFIG)

@@ -192,6 +192,14 @@ def test_check_purchase_more_equity_vs_hedge():
     assert hedge["bets_after"] - hedge["bets_before"] > eq["bets_after"] - eq["bets_before"]
 
 
+def test_purchase_summary_verdict_and_alternative():
+    from engine.whatif import check_purchase, diversification_verdict, purchase_summary
+    assert [diversification_verdict(x) for x in (-0.05, 0.005, 0.05, None)] == \
+        ["concentrates", "little_change", "diversifies", "little_change"]
+    eq = purchase_summary(check_purchase({"VOO": 60, "IEF": 40}, "QQQ", 2_500, store=FakeStore()))
+    assert eq["verdict"] == "concentrates" and eq["best_alternative"]["is_better"]
+
+
 def test_purchase_from_a_full_run_matches_check_purchase():
     from engine.whatif import ALPHA_GRID, CANDIDATE_SETS, check_purchase, purchase_from, summary_sentence
     h = {"VOO": 60, "QQQ": 40}
