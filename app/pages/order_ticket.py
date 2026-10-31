@@ -8,11 +8,11 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from engine.data import PriceStore, load_universe, normalize_ticker  # noqa: E402
 from engine.whatif import check_purchase, purchase_record, purchase_summary  # noqa: E402
+from app.whatif_tab import verdict_badge  # noqa: E402
 
 st.set_page_config(page_title="Order ticket", page_icon=":material/receipt_long:", layout="wide")
 
 EXAMPLE = {"VOO": 30, "QQQ": 25, "VTI": 15, "NVDA": 10, "AGG": 10, "GLD": 10}
-GOOD, SERIOUS, NEUTRAL = "#0ca30c", "#ec835a", "#8f8e88"
 
 
 @st.cache_resource
@@ -49,23 +49,18 @@ def reset_review():
     st.session_state["ot_reviewed"] = False
 
 
-def badge(text: str, icon: str, color: str):
-    st.markdown(f"<span style='display:inline-block;padding:4px 10px;border-radius:12px;"
-                f"border:1px solid {color};color:{color};font-weight:600'>{icon} {text}</span>",
-                unsafe_allow_html=True)
-
-
 holdings, portfolio_value, from_main = current_portfolio()
 uni = universe()
 
-st.title("Order ticket")
+st.title("Order ticket", anchor=False)
 st.caption("Demo brokerage · illustration of the pre-trade diversification check, not a real trading screen.")
 
 left, right = st.columns([2, 3], gap="large")
 
 with left:
     with st.container(border=True):
-        st.subheader("New order", help="A simplified market order. The check runs when you review the order.")
+        st.subheader("New order", help="A simplified market order. The check runs when you review the order.",
+                     anchor=False)
         account_value = st.number_input("Account value (US$)", min_value=100.0, value=portfolio_value, step=1_000.0,
                                         key="ot_value", on_change=reset_review,
                                         help="Current value of the holdings below.")
@@ -101,17 +96,11 @@ with right:
         st.subheader("Pre-trade diversification check",
                      help="What this order does to your portfolio's diversification over the last five years "
                           "and in two past crashes, compared with putting the same amount elsewhere. "
-                          "Based on historical prices; not investment advice.")
+                          "Based on historical prices; not investment advice.", anchor=False)
         st.markdown(f"**Buy {s['ticker']} · \\${s['amount']:,.0f}** "
                     f"({s['share_of_portfolio_after']:.1%} of the account after the order)"
                     + (f" · {s['already_held']}" if s["already_held"] else ""))
-        d = s["change_in_bets"] or 0.0
-        if d < -0.01:
-            badge("Concentrates your portfolio", "⚠", SERIOUS)
-        elif d > 0.01:
-            badge("Adds diversification", "✓", GOOD)
-        else:
-            badge("Little change in diversification", "•", NEUTRAL)
+        verdict_badge(s["verdict"])
 
         a, b, c = st.columns(3)
         a.metric("Equivalent bets", f"{n['bets_after']:.2f}",
@@ -137,7 +126,7 @@ with right:
                          "portfolios, TLT cushioned COVID but softened the 2022 fall in only 17% of them.")
 
         alt = s["best_alternative"]
-        if alt and alt["ticker"] != s["ticker"] and (alt["bets_after"] > n["bets_after"] + 0.01 or (alt["softened_all_crises"] and not both)):
+        if alt and alt["is_better"]:
             with st.container(border=True):
                 st.markdown(f"**Alternative:** the same \\${s['amount']:,.0f} in **{alt['ticker']}** ({alt['name']}) "
                             f"gives {alt['bets_after']:.2f} equivalent bets"
